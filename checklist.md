@@ -1,6 +1,6 @@
-- [ ] Датасет
+- [x] Датасет
 - [ ] Анотація датасету
-- [ ] preprocessing
+- [x] preprocessing
 - [ ] Transnet cut detection та обрізка відео по переходам
 - [ ] навчання co-detr 
 - [ ] Co-detr detection на найкращих кадрах з відео
