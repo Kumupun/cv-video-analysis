@@ -1,0 +1,53 @@
+# Integration overlay for participants 3 and 4.
+# It validates contracts and GPU/container wiring. For strict local Ray
+# zero-copy, deploy decoding and ML actors on the same Ray node; see docs.
+services:
+  cut-worker:
+    build:
+      context: ./backend
+      dockerfile: docker/Dockerfile.ml-worker
+    command: ["python", "-m", "cut_worker.main"]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      RAY_ADDRESS: ray://ray-head:10001
+      WORKER_METRICS_PORT: 9101
+    shm_size: ${ML_WORKER_SHM_SIZE:-4gb}
+    expose: ["9101"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      ray-head:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks: [pipeline]
+
+  tracking-worker:
+    build:
+      context: ./backend
+      dockerfile: docker/Dockerfile.ml-worker
+    command: ["python", "-m", "tracking_worker.main"]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      RAY_ADDRESS: ray://ray-head:10001
+      WORKER_METRICS_PORT: 9101
+    shm_size: ${ML_WORKER_SHM_SIZE:-4gb}
+    expose: ["9101"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      ray-head:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks: [pipeline]
