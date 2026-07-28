@@ -54,10 +54,11 @@ def preprocess_video(video_path, target_fps = 25, target_size = (48, 27)):
             resized = cv2.resize(padded, target_size, interpolation=cv2.INTER_AREA)
             rgb_frame = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
             
-            frames_buffer.append(rgb_frame)
-            index_mapping.append(current_orig_frame)
+            while current_time >= next_target_time:
+                frames_buffer.append(rgb_frame)
+                index_mapping.append(current_orig_frame)
             
-            next_target_time += (1.0 / target_fps)
+                next_target_time += (1.0 / target_fps)
             
         current_orig_frame += 1
         
