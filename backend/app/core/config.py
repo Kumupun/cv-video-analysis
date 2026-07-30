@@ -29,7 +29,18 @@ class Settings(BaseSettings):
 
     upload_dir: Path = Path("/data/uploads")
     result_dir: Path = Path("/data/results")
-    max_upload_bytes: int = 2 * 1024 * 1024 * 1024
+    # Archive admission is primarily size-based. A single video may use the
+    # whole 4 GiB batch budget, while many small videos may share it.
+    max_upload_bytes: int = 4 * 1024 * 1024 * 1024
+    max_archive_upload_bytes: int = 4 * 1024 * 1024 * 1024
+    max_archive_video_bytes: int = 4 * 1024 * 1024 * 1024
+    max_archive_uncompressed_bytes: int = 8 * 1024 * 1024 * 1024
+    max_archive_members: int = Field(default=2_000, ge=1, le=10_000)
+    max_archive_compression_ratio: float = Field(default=100.0, ge=1.0)
+    archive_disk_reserve_bytes: int = Field(
+        default=512 * 1024 * 1024,
+        ge=0,
+    )
     allowed_video_extensions: tuple[str, ...] = (
         ".mp4",
         ".mov",
@@ -41,6 +52,27 @@ class Settings(BaseSettings):
     allowed_video_mime_prefix: str = "video/"
     chunk_size_frames: int = Field(default=64, ge=8, le=1024)
     chunk_overlap_frames: int = Field(default=16, ge=0, le=512)
+    max_decoded_chunk_bytes: int = Field(
+        default=80 * 1024 * 1024,
+        ge=8 * 1024 * 1024,
+    )
+    max_inflight_chunks_per_task: int = Field(default=2, ge=1, le=128)
+    max_inflight_chunks_global: int = Field(default=2, ge=1, le=512)
+    ingest_backpressure_poll_seconds: float = Field(default=0.1, gt=0.0, le=10.0)
+    downstream_stall_timeout_seconds: float = Field(
+        default=120.0,
+        gt=0.0,
+        le=3_600.0,
+    )
+    decode_batch_timeout_seconds: float = Field(default=120.0, gt=0.0)
+    ray_put_timeout_seconds: float = Field(default=120.0, gt=0.0)
+    ray_put_max_attempts: int = Field(default=3, ge=1, le=10)
+    ray_put_retry_delay_seconds: float = Field(default=1.0, gt=0.0, le=30.0)
+    ray_actor_call_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0.0,
+        le=600.0,
+    )
 
     allow_remote_urls: bool = False
     remote_download_timeout_seconds: float = 60.0
@@ -63,7 +95,24 @@ class Settings(BaseSettings):
     stream_batch_size: int = 8
     stream_claim_idle_ms: int = 60_000
     stream_max_delivery_attempts: int = 3
+    # Retry the same message before moving to later stream entries. This is
+    # essential for stateful stages such as tracking, where processing chunk
+    # N+1 after a temporary failure of chunk N would violate ordering.
+    stream_retry_delay_seconds: float = Field(default=0.5, ge=0.0, le=30.0)
     stream_maxlen: int = 50_000
+
+    # Workers process different task IDs concurrently while preserving strict
+    # ordering inside each individual video partition.
+    ingest_worker_concurrency: int = Field(default=2, ge=1, le=16)
+    cut_worker_concurrency: int = Field(default=2, ge=1, le=32)
+    coordinator_worker_concurrency: int = Field(default=4, ge=1, le=64)
+    tracking_worker_concurrency: int = Field(default=2, ge=1, le=32)
+    aggregator_worker_concurrency: int = Field(default=2, ge=1, le=32)
+
+    # Status reads are retried because a short Redis/network hiccup should not
+    # surface as a transient HTTP 500 while the task keeps processing.
+    status_read_max_attempts: int = Field(default=3, ge=1, le=10)
+    status_read_retry_delay_seconds: float = Field(default=0.05, ge=0.0, le=5.0)
 
     task_ttl_seconds: int = 7 * 24 * 60 * 60
     result_ttl_seconds: int = 7 * 24 * 60 * 60
@@ -71,7 +120,8 @@ class Settings(BaseSettings):
     worker_metrics_port: int = Field(default=9101, ge=1024, le=65535)
 
     mock_cut_threshold: float = 0.85
-    mock_worker_delay_ms: int = 50
+    mock_worker_delay_ms: int = Field(default=0, ge=0, le=60_000)
+    progress_update_every_chunks: int = Field(default=5, ge=1, le=1_000)
 
     prometheus_multiproc_dir: Path | None = None
 
