@@ -26,12 +26,27 @@ class FakeRegistry:
     def __init__(self) -> None:
         self.refs: dict[str, FakeObjectRef] = {}
         self.descriptors: dict[str, dict[str, Any]] = {}
+        self.reservations: set[str] = set()
+        self.reserve = FakeRemoteMethod(self._reserve)
+        self.cancel_reservation = FakeRemoteMethod(self._cancel_reservation)
         self.register = FakeRemoteMethod(self._register)
         self.resolve = FakeRemoteMethod(self._resolve)
         self.describe = FakeRemoteMethod(self._describe)
         self.validate_frames = FakeRemoteMethod(self._validate_frames)
         self.release = FakeRemoteMethod(self._release)
         self.count = FakeRemoteMethod(self._count)
+
+    def _reserve(self, token: str, max_objects: int) -> str:
+        if len(self.refs) + len(self.reservations) >= max_objects:
+            raise RuntimeError("capacity reached")
+        self.reservations.add(token)
+        return token
+
+    def _cancel_reservation(self, token: str) -> bool:
+        if token not in self.reservations:
+            return False
+        self.reservations.remove(token)
+        return True
 
     def _register(
         self,
@@ -40,6 +55,7 @@ class FakeRegistry:
         descriptor: dict[str, Any],
         max_objects: int,
     ) -> str:
+        self.reservations.discard(token)
         if len(self.refs) >= max_objects:
             raise RuntimeError("capacity reached")
         self.refs[token] = wrapped_ref[0]
@@ -63,18 +79,22 @@ class FakeRegistry:
         return {"frame_count": int(descriptor["shape"][0])}
 
     def _release(self, token: str) -> bool:
+        reservation_removed = token in self.reservations
+        self.reservations.discard(token)
         self.descriptors.pop(token, None)
-        return self.refs.pop(token, None) is not None
+        return self.refs.pop(token, None) is not None or reservation_removed
 
     def _count(self) -> int:
-        return len(self.refs)
+        return len(self.refs) + len(self.reservations)
 
 
 class FakeRay:
     def __init__(self) -> None:
         self.timeouts: list[float] = []
+        self.put_calls = 0
 
     def put(self, value: Any) -> FakeObjectRef:
+        self.put_calls += 1
         return FakeObjectRef(value)
 
     def get(self, value: Any, *, timeout: float) -> Any:
@@ -136,3 +156,4 @@ def test_registry_rejects_more_than_global_limit() -> None:
         store.put({"chunk": 2})
 
     assert len(fake_registry.refs) == 1
+    assert store._ray.put_calls == 1

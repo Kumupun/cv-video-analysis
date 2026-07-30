@@ -163,6 +163,12 @@ class IngestHandler:
                     is_last=batch.is_last,
                     decode_ms=decode_ms,
                 )
+                # The Ray Object Store now owns the tensor. Drop the local
+                # NumPy reference before waiting for downstream capacity;
+                # otherwise each concurrent video keeps its previous 64–80 MiB
+                # batch alive while decoding the next one.
+                del batch
+
                 is_new = False
                 try:
                     is_new = await self.repository.publish_ingest_chunk_once(

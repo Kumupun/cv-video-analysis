@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     chunk_size_frames: int = Field(default=64, ge=8, le=1024)
     chunk_overlap_frames: int = Field(default=16, ge=0, le=512)
     max_decoded_chunk_bytes: int = Field(
-        default=80 * 1024 * 1024,
+        default=64 * 1024 * 1024,
         ge=8 * 1024 * 1024,
     )
     max_inflight_chunks_per_task: int = Field(default=2, ge=1, le=128)

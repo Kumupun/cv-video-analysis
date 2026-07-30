@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import prometheus_client
@@ -96,3 +97,51 @@ async def test_terminal_dead_letter_marks_task_failed() -> None:
     assert calls == [
         ("failed-task", "mock_cut_failed", "Ray actor unavailable"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_worker_retries_transient_redis_poll_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleep_calls: list[float] = []
+
+    class StreamsStub:
+        def __init__(self) -> None:
+            self.claim_calls = 0
+
+        async def wait_until_ready(self) -> None:
+            return None
+
+        async def ensure_group(self, stream: str, group: str) -> None:
+            return None
+
+        async def claim_stale(self, **kwargs):
+            self.claim_calls += 1
+            if self.claim_calls == 1:
+                raise TimeoutError("temporary Redis timeout")
+            raise asyncio.CancelledError
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+
+    streams = StreamsStub()
+    worker = common.StreamWorker.__new__(common.StreamWorker)
+    worker.worker_name = "test-worker"
+    worker.stream = "cv:test"
+    worker.group = "test-group"
+    worker.consumer = "test-consumer"
+    worker.max_concurrency = 1
+    worker.partition_by_task = False
+    worker.streams = streams
+    worker.settings = SimpleNamespace(
+        stream_batch_size=8,
+        stream_retry_delay_seconds=0.5,
+    )
+
+    monkeypatch.setattr(common.asyncio, "sleep", fake_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await worker.run_forever()
+
+    assert streams.claim_calls == 2
+    assert sleep_calls == [0.5]

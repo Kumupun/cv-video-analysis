@@ -62,21 +62,36 @@ class StreamWorker:
             },
         )
         while True:
-            messages = await self.streams.claim_stale(
-                stream=self.stream,
-                group=self.group,
-                consumer=self.consumer,
-            )
-            if not messages:
-                messages = await self.streams.read_group(
+            try:
+                messages = await self.streams.claim_stale(
                     stream=self.stream,
                     group=self.group,
                     consumer=self.consumer,
-                    count=max(
-                        self.settings.stream_batch_size,
-                        self.max_concurrency,
-                    ),
                 )
+                if not messages:
+                    messages = await self.streams.read_group(
+                        stream=self.stream,
+                        group=self.group,
+                        consumer=self.consumer,
+                        count=max(
+                            self.settings.stream_batch_size,
+                            self.max_concurrency,
+                        ),
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning(
+                    "Redis stream polling failed; retrying without exiting",
+                    extra={
+                        "stream": self.stream,
+                        "stage": self.worker_name,
+                    },
+                    exc_info=True,
+                )
+                await asyncio.sleep(max(self.settings.stream_retry_delay_seconds, 0.1))
+                continue
+
             if not messages:
                 continue
             await self._process_batch(messages)

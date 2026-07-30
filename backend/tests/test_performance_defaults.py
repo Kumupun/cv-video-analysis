@@ -4,7 +4,7 @@ from app.core.config import PROJECT_ROOT, Settings
 def test_local_performance_defaults_are_memory_bounded() -> None:
     settings = Settings(_env_file=None)
 
-    assert settings.max_decoded_chunk_bytes == 80 * 1024 * 1024
+    assert settings.max_decoded_chunk_bytes == 64 * 1024 * 1024
     assert settings.max_inflight_chunks_per_task == 2
     assert settings.max_inflight_chunks_global == 2
     assert settings.mock_worker_delay_ms == 0
