@@ -90,17 +90,13 @@ class RayObjectStore:
         return int(self._get(count_ref))
 
     def resolve_ref(self, token: str) -> Any:
-        wrapped_ref = self._get(
-            self._registry_handle().resolve.remote(token)
-        )
+        wrapped_ref = self._get(self._registry_handle().resolve.remote(token))
         if not isinstance(wrapped_ref, list) or len(wrapped_ref) != 1:
             raise RuntimeError("Ray object registry returned an invalid reference")
         return wrapped_ref[0]
 
     def describe(self, token: str) -> dict[str, Any]:
-        descriptor = self._get(
-            self._registry_handle().describe.remote(token)
-        )
+        descriptor = self._get(self._registry_handle().describe.remote(token))
         if not isinstance(descriptor, dict):
             raise RuntimeError("Ray object registry returned invalid metadata")
         return dict(descriptor)

@@ -117,9 +117,7 @@ def test_registry_token_round_trip() -> None:
         "nbytes": frames.nbytes,
     }
     assert store.validate_frames(token) == {"frame_count": 64}
-    assert store.validate_frames(token, validate_payload=True) == {
-        "frame_count": 64
-    }
+    assert store.validate_frames(token, validate_payload=True) == {"frame_count": 64}
     assert store.registered_count() == 1
     assert token in fake_registry.refs
     assert set(store._ray.timeouts) == {12}

@@ -108,9 +108,7 @@ class IngestHandler:
                 asyncio.to_thread(decoder.open),
                 timeout=self.settings.decode_batch_timeout_seconds,
             )
-            metadata_probe_ms = (
-                time.perf_counter() - metadata_started
-            ) * 1_000
+            metadata_probe_ms = (time.perf_counter() - metadata_started) * 1_000
             await self.repository.save_video_metadata(task_id, metadata)
             total_chunks = decoder.total_chunks
             await self._advance_stage_if_needed(
@@ -124,20 +122,16 @@ class IngestHandler:
                 ),
             )
 
-            published_count = await self.repository.get_ingest_published_chunks(
-                task_id
-            )
+            published_count = await self.repository.get_ingest_published_chunks(task_id)
             released_count = 0
             # Ingest publishes chunks in deterministic order. Starting at the
             # durable count avoids one Redis existence check per chunk on the
             # normal path and still keeps publish_ingest_chunk_once idempotent.
             for chunk_index in range(min(published_count, total_chunks), total_chunks):
-                has_capacity, released_count = (
-                    await self._wait_for_downstream_capacity(
-                        task_id,
-                        published_count,
-                        released_count,
-                    )
+                has_capacity, released_count = await self._wait_for_downstream_capacity(
+                    task_id,
+                    published_count,
+                    released_count,
                 )
                 if not has_capacity:
                     return
@@ -192,9 +186,7 @@ class IngestHandler:
                 CHUNKS_PUBLISHED.inc()
                 published_count += 1
                 if self._should_publish_progress(published_count, total_chunks):
-                    progress = 8.0 + 22.0 * (
-                        published_count / max(total_chunks, 1)
-                    )
+                    progress = 8.0 + 22.0 * (published_count / max(total_chunks, 1))
                     await self.repository.update_status(
                         task_id,
                         progress=progress,
@@ -361,8 +353,8 @@ class IngestHandler:
         last_global_in_flight = -1
 
         while True:
-            stage, tracking_completed = (
-                await self.repository.get_backpressure_state(task_id)
+            stage, tracking_completed = await self.repository.get_backpressure_state(
+                task_id
             )
             if tracking_completed > released_count:
                 released_count = await self._release_completed_chunks(
@@ -395,12 +387,8 @@ class IngestHandler:
             ):
                 return True, released_count
 
-            if (
-                tracking_completed > last_tracking_completed
-                or (
-                    last_global_in_flight >= 0
-                    and global_in_flight < last_global_in_flight
-                )
+            if tracking_completed > last_tracking_completed or (
+                last_global_in_flight >= 0 and global_in_flight < last_global_in_flight
             ):
                 stalled_since = time.monotonic()
             last_tracking_completed = tracking_completed
@@ -432,8 +420,8 @@ class IngestHandler:
         stalled_since = time.monotonic()
         last_tracking_completed = -1
         while released_count < total_chunks:
-            stage, tracking_completed = (
-                await self.repository.get_backpressure_state(task_id)
+            stage, tracking_completed = await self.repository.get_backpressure_state(
+                task_id
             )
             if tracking_completed > released_count:
                 released_count = await self._release_completed_chunks(
@@ -462,7 +450,6 @@ class IngestHandler:
                     f"stage={stage.value}. Check cut/tracking worker logs."
                 )
             await asyncio.sleep(self.settings.ingest_backpressure_poll_seconds)
-
 
 
 def factory(settings: Settings, streams: RedisStreams) -> StreamWorker:

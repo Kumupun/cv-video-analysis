@@ -113,9 +113,7 @@ def get_object_registry_actor(ray: Any) -> Any:
                 actual_shape = [int(dimension) for dimension in frames.shape]
                 expected_shape = [int(dimension) for dimension in shape]
                 if actual_shape != expected_shape:
-                    raise ValueError(
-                        "Frame tensor does not match its descriptor"
-                    )
+                    raise ValueError("Frame tensor does not match its descriptor")
 
             return {"frame_count": int(shape[0])}
 

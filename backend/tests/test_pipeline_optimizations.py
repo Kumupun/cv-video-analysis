@@ -100,14 +100,14 @@ async def test_cut_persistence_and_contiguous_dispatch_use_one_lua_call() -> Non
 def test_chunk_key_does_not_duplicate_task_id() -> None:
     task_id = uuid4()
 
-    assert RedisTaskRepository._chunk_key(
-        task_id,
-        f"{task_id}:00000000",
-    ) == f"cv:chunk:{task_id}:00000000"
     assert (
-        RedisTaskRepository._chunk_key_prefix(task_id)
-        == f"cv:chunk:{task_id}:"
+        RedisTaskRepository._chunk_key(
+            task_id,
+            f"{task_id}:00000000",
+        )
+        == f"cv:chunk:{task_id}:00000000"
     )
+    assert RedisTaskRepository._chunk_key_prefix(task_id) == f"cv:chunk:{task_id}:"
 
 
 @pytest.mark.asyncio

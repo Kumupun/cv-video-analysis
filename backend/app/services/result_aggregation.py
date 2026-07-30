@@ -68,11 +68,7 @@ def aggregate_result(
     cut_detection_ms = sum(item.cut_processing_ms for item in cuts)
     tracking_ms = sum(item.tracking_processing_ms for item in tracking)
     measured_ms = (
-        queue_wait_ms
-        + decoding_ms
-        + cut_detection_ms
-        + tracking_ms
-        + aggregation_ms
+        queue_wait_ms + decoding_ms + cut_detection_ms + tracking_ms + aggregation_ms
     )
     orchestration_wait_ms = max(0.0, total_ms - measured_ms)
 
