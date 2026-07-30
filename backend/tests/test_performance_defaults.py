@@ -1,4 +1,4 @@
-from app.core.config import Settings
+from app.core.config import PROJECT_ROOT, Settings
 
 
 def test_local_performance_defaults_are_memory_bounded() -> None:
@@ -17,10 +17,12 @@ def test_local_performance_defaults_are_memory_bounded() -> None:
 
 
 def test_local_env_enables_two_video_parallelism() -> None:
-    from app.core.config import PROJECT_ROOT
+    env_path = PROJECT_ROOT / ".env"
+    if not env_path.exists():
+        env_path = PROJECT_ROOT / ".env.example"
 
     values: dict[str, str] = {}
-    for raw_line in (PROJECT_ROOT / ".env").read_text(encoding="utf-8").splitlines():
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
