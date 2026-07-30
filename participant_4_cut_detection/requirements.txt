@@ -1,0 +1,5 @@
+numpy
+ray
+redis
+torch
+opencv-python-headless
