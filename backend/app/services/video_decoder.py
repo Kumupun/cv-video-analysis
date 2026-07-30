@@ -337,10 +337,12 @@ class FFmpegVideoDecoder:
             process.stdout.close()
         try:
             return_code = process.wait(timeout=self._process_stop_timeout_seconds)
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
             process.kill()
             process.wait(timeout=self._process_stop_timeout_seconds)
-            raise VideoDecodeError("FFmpeg did not stop after decoding the last frame")
+            raise VideoDecodeError(
+                "FFmpeg did not stop after decoding the last frame"
+            ) from exc
 
         stderr = b""
         if process.stderr is not None:
@@ -431,8 +433,7 @@ class FFmpegVideoDecoder:
             completed = subprocess.run(
                 command,
                 check=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 text=True,
                 timeout=self._probe_timeout_seconds,
             )
