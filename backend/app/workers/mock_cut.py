@@ -1,45 +1,52 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 from app.core.config import Settings
 from app.domain.schemas import CutResultMessage, FrameBatchMetadata, SceneInterval
-from app.infrastructure.ray_store import RayObjectStore
 from app.infrastructure.redis_streams import RedisStreams, StreamMessage
 from app.infrastructure.serialization import (
     model_to_stream_fields,
     stream_fields_to_model,
 )
-from app.ray_runtime.mock_actors import get_mock_cut_actor
 from app.workers.common import StreamWorker, run_worker
 
 
+def _validate_batch_metadata(batch: FrameBatchMetadata) -> None:
+    """Validate the mock contract without opening a second Ray Client path.
+
+    Ingest has already decoded the tensor, stored it in Ray and persisted the
+    exact context range. The local mock worker does not run a model, so fetching
+    the same tensor through a detached actor only adds a cross-client blocking
+    point and provides no extra contract coverage.
+    """
+
+    expected_frame_count = batch.context_end_frame - batch.context_start_frame + 1
+    if batch.frame_count != expected_frame_count:
+        raise ValueError(
+            "Frame metadata is inconsistent: "
+            f"frame_count={batch.frame_count}, context={expected_frame_count}"
+        )
+    if not batch.object_ref.startswith("ray-object:"):
+        raise ValueError("Expected an opaque Ray object token")
+
+
 class MockCutHandler:
-    """Development-only actor adapter; it is not a cut-detection model."""
+    """Development-only contract adapter; it is not a cut model."""
 
     def __init__(self, settings: Settings, streams: RedisStreams) -> None:
         self.settings = settings
         self.streams = streams
-        self.object_store = RayObjectStore(settings)
-        self._actor = None
-
-    def _actor_handle(self):
-        if self._actor is None:
-            self._actor = get_mock_cut_actor(self.object_store.ray)
-        return self._actor
 
     async def __call__(self, message: StreamMessage) -> None:
         batch = stream_fields_to_model(message.fields, FrameBatchMetadata)
-        frame_ref = self.object_store.resolve_ref(batch.object_ref)
-        actor_result_ref = self._actor_handle().analyze.remote(frame_ref)
-        actor_result = await asyncio.to_thread(
-            self.object_store.ray.get,
-            actor_result_ref,
-        )
-        if actor_result["frame_count"] != batch.frame_count:
-            raise ValueError("Ray Actor received an unexpected frame count")
+        started = time.perf_counter()
+        _validate_batch_metadata(batch)
 
-        await asyncio.sleep(self.settings.mock_worker_delay_ms / 1_000)
+        if self.settings.mock_worker_delay_ms:
+            await asyncio.sleep(self.settings.mock_worker_delay_ms / 1_000)
+        cut_processing_ms = (time.perf_counter() - started) * 1_000
         result = CutResultMessage(
             task_id=batch.task_id,
             chunk_id=batch.chunk_id,
@@ -58,6 +65,9 @@ class MockCutHandler:
                     end_frame=batch.valid_end_frame,
                 )
             ],
+            is_last=batch.is_last,
+            decode_ms=batch.decode_ms,
+            cut_processing_ms=cut_processing_ms,
         )
         await self.streams.publish(
             self.settings.stream_cut_results,
@@ -73,6 +83,8 @@ def factory(settings: Settings, streams: RedisStreams) -> StreamWorker:
         handler=MockCutHandler(settings, streams),
         settings=settings,
         streams=streams,
+        max_concurrency=settings.cut_worker_concurrency,
+        partition_by_task=True,
     )
 
 
