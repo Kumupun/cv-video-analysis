@@ -2,7 +2,7 @@
 
 Каркас ролей **5 (Backend / Pipeline Engineer)** та **6 (MLOps Engineer)** для пайплайна:
 
-`upload/URL → RGB decode → Ray Object Store → cut detection → verified tracking job → tracking → aggregation → JSON`
+`upload/URL/ZIP batch → RGB decode → Ray Object Store → cut detection → verified tracking job → tracking → aggregation → JSON`
 
 ## Критичні правила
 
@@ -50,6 +50,29 @@ docker compose --profile mock up --build
 
 API: `http://localhost:8000/docs`
 
+### Локальний запуск при обмеженій пам’яті Docker Desktop
+
+У mock-профілі Ray dashboard вимкнений, а локальний Ray memory monitor за
+замовчуванням вимкнений через `RAY_MEMORY_MONITOR_REFRESH_MS=0`. Це запобігає
+хибному `ingest_failed`, коли Docker VM уже використовує понад стандартні 95%
+пам’яті, хоча Ray Object Store майже порожній. Для production поверніть
+`RAY_MEMORY_MONITOR_REFRESH_MS=250`, залиште достатній запас RAM і налаштуйте
+`RAY_MEMORY_USAGE_THRESHOLD`.
+
+Локальний performance preset використовує RGB-chunk до 80 MiB і не більше двох
+одночасних chunk-ів. Два максимальні тензори займають до 160 MiB, тому
+залишають достатній запас у 256 MiB Ray Object Store. На двох референсних
+відео це дає приблизно 100 chunk-ів без зміни FPS, роздільної здатності чи
+глобальних номерів кадрів. Mock actors також не мають штучної затримки
+(`MOCK_WORKER_DELAY_MS=0`).
+
+Після зміни Ray-параметрів обов’язково повністю перестворіть stack:
+
+```bash
+docker compose --profile mock down -v --remove-orphans
+docker compose --profile mock up --build -d
+```
+
 ```bash
 curl -X POST http://localhost:8000/api/v1/process \
   -F "file=@sample.mp4"
@@ -62,7 +85,44 @@ curl http://localhost:8000/api/v1/status/<task_id>
 curl http://localhost:8000/api/v1/results/<task_id>
 ```
 
-Mock cut worker створює одну сцену на chunk, а mock tracking worker повертає порожній список треків. Обидві заглушки викликають named Ray Actors, тому перевіряється не лише Redis-проводка, а й actor-шлях без вигаданих ML-результатів.
+### Завантаження ZIP з кількома відео
+
+Окремий endpoint не змінює контракт одиночного `/process`:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/process/archive \
+  -F "file=@videos.zip"
+```
+
+Кожне підтримуване відео в архіві отримує власний `task_id`, `status_url` і
+`results_url`. Сторонні файли (`.txt`, `.json`, системні файли macOS тощо)
+не запускаються, а повертаються в `skipped_files` із причиною. Усі відеозадачі
+створюються в Redis однією транзакцією.
+
+ZIP-приймання тепер орієнтується насамперед на **сумарний розмір відео**, а
+не на їх кількість. За замовчуванням дозволено до 4 GiB для самого ZIP і до
+4 GiB сумарно для всіх підтримуваних відео всередині нього. Тому один великий
+файл може використати весь бюджет або багато малих файлів можуть поділити його.
+`MAX_ARCHIVE_MEMBERS=2000` залишається лише технічним anti-abuse запобіжником,
+а не бізнес-лімітом кількості відео.
+
+Відповідь endpoint також містить `archive_size_bytes` і
+`accepted_size_bytes`, щоб клієнт бачив фактичне використання розмірного
+бюджету. ZIP-перевірка захищає від path traversal, символічних посилань,
+зашифрованих entries, zip-bomb сценаріїв, нестачі місця на диску та підозріло
+високого compression ratio. Ліміти налаштовуються через `MAX_ARCHIVE_*` у
+`.env`.
+
+Короткі збої читання статусу з Redis повторюються автоматично. Якщо стан усе
+ще недоступний, API повертає retryable `503` із `Retry-After: 1`, а не
+неінформативний `500 Internal Server Error`.
+
+Mock cut worker створює одну сцену на chunk, а mock tracking worker повертає
+порожній список треків. Заглушки перевіряють лише строгі метадані повідомлень і
+не відкривають додаткові Ray Client з’єднання. RGB-тензор усе одно зберігається
+в Ray ingest-процесом; після підтвердженого tracking-result той самий ingest
+процес звільняє ObjectRef. Це прибирає блокування першого chunk у Docker Desktop,
+але зберігає реальний Object Store, backpressure та контроль часу життя даних.
 
 ## Підключення реальних ролей 3 і 4
 
@@ -71,11 +131,25 @@ Mock cut worker створює одну сцену на chunk, а mock tracking 
 - роль 4 читає `cv:video_chunks` як consumer group `cut-workers` і публікує `CutResultMessage` у `cv:cut_results`;
 - coordinator читає `cv:cut_results` і тільки після цього створює `TrackingJobMessage` у `cv:tracking_jobs`;
 - роль 3 читає `cv:tracking_jobs` як consumer group `tracking-workers` і публікує `TrackingResultMessage` у `cv:tracking_results`;
-- aggregator збирає відповіді та звільняє Ray-об’єкт.
+- aggregator збирає відповіді; ingest звільняє Ray-об’єкт після durable tracking completion.
 
 Приклад GPU-сервісів знаходиться в `compose.ml.example.yaml`. Реальні пакети/команди ролей 3 і 4 треба підставити замість `cut_worker.main` та `tracking_worker.main`.
 
 Точні поля, frame mapping і правила ownership описані в `docs/WORKER_CONTRACTS.md`. Повний аналіз рішень та обмежень — у `docs/ARCHITECTURE_AND_DECISIONS.md`.
+
+## Локальний запуск усього ZIP у Windows PowerShell
+
+Скрипт не розпаковує ZIP вручну і не вибирає лише найбільший файл. Він
+відправляє весь архів у `POST /api/v1/process/archive`, показує окремий
+`task_id` для кожного прийнятого відео та зберігає всі результати:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\run_mock_archive.ps1
+```
+
+За замовчуванням використовується `%USERPROFILE%\Downloads\video.zip`.
+Інший шлях можна передати параметром `-ArchivePath`.
 
 ## Моніторинг
 
@@ -96,7 +170,18 @@ docker compose --profile monitoring --profile gpu up --build
 
 ## Межі chunk-ів
 
-За замовчуванням backend формує 64 унікальні кадри на chunk і додає 16 попередніх кадрів як контекст. ML-воркер отримує `context_start_frame/context_end_frame` та `valid_start_frame/valid_end_frame`. Глобальний номер кадру дорівнює `context_start_frame + local_index`; фінальні події дозволено публікувати лише для valid range.
+Backend намагається формувати до 64 унікальних кадрів на chunk і додавати
+до 16 попередніх кадрів як контекст. Фактичний розмір автоматично зменшується,
+щоб RGB-тензор не перевищував `MAX_DECODED_CHUNK_BYTES` (80 MiB у локальному
+preset). ML-воркер отримує `context_start_frame/context_end_frame` та
+`valid_start_frame/valid_end_frame`. Глобальний номер кадру дорівнює
+`context_start_frame + local_index`; фінальні події дозволено публікувати лише
+для valid range.
+
+Ingest спочатку чекає вільного місця downstream і лише потім декодує наступний
+chunk. Тому великий наступний тензор не лежить у RAM одночасно з попереднім
+Ray-об’єктом під час backpressure. Відновлення ingest також може перейти прямо
+до потрібного `chunk_index`, не декодуючи повторно вже опубліковані частини.
 
 ## Важлива примітка щодо FPS
 
@@ -122,3 +207,55 @@ docker compose -f compose.yaml -f compose.ml.example.yaml config --quiet
 - `ALLOW_REMOTE_URLS=false` за замовчуванням. При увімкненні URL перевіряються проти private/loopback/reserved IP для зменшення SSRF-ризику.
 - `RAY_SHM_SIZE` та `RAY_OBJECT_STORE_BYTES` треба підібрати під RAM сервера. Не задавайте їх “наосліп” як 30–50% без перевірки паралельності, розміру кадрів і запасу для ОС/воркерів.
 - Redis і Ray не публікуються назовні; зовні доступний лише FastAPI, а monitoring-порти можна закрити reverse proxy/VPN.
+
+## Throughput profile 1.1
+
+The local mock pipeline now keeps strict order inside one video while processing
+independent video task IDs concurrently. Default concurrency is two for ingest,
+cut, tracking, and aggregation, and four for the lightweight coordinator. When
+more than one archive video is active, ingest reserves one of the two Ray Object
+Store slots per video so the first large video cannot keep every slot while the
+next video remains queued.
+
+The cut coordinator stores the cut payload, buffers out-of-order chunks, and
+publishes all newly contiguous tracking jobs in one Redis Lua call. Tracking
+completion and visible progress are also updated atomically. Final aggregation
+fetches deterministic chunk hashes through one Redis pipeline instead of a
+`SCAN` followed by one network request per chunk.
+
+Local mock workers consume only the validated stream metadata and never call a
+detached actor from a second Ray Client process. Ingest remains the owner of the
+bounded Ray objects, observes durable tracking completion in Redis, and releases
+completed chunks through its already-established registry handle. Every owner
+registry call has a hard timeout, so failures become visible instead of blocking
+forever at `cut_detection`.
+
+Every final result now contains a `timings` object:
+
+```json
+{
+  "queue_wait_ms": 0.0,
+  "decoding_ms": 0.0,
+  "cut_detection_ms": 0.0,
+  "tracking_ms": 0.0,
+  "aggregation_ms": 0.0,
+  "orchestration_wait_ms": 0.0,
+  "total_ms": 0.0
+}
+```
+
+`total_ms` is wall-clock time from task creation. The decode, cut, and tracking
+values are summed active chunk-processing times; with parallel work they may
+overlap. `orchestration_wait_ms` is the non-negative remainder and helps reveal
+Redis/Ray/backpressure overhead. The result contract version is now `1.1`.
+
+
+### Why mock workers do not copy full RGB tensors
+
+The local `mock` profile validates shape and frame-range metadata directly from
+the strict Pydantic messages. Ingest still stores bounded frame tensors in Ray
+and releases them only after Redis records tracking completion, so backpressure
+and object lifetime remain covered. Avoiding Ray calls from mock cut, tracking,
+and aggregation removes the cross-client blocking path that stalled Docker
+Desktop. Owner-side registry calls are bounded by
+`RAY_ACTOR_CALL_TIMEOUT_SECONDS`.

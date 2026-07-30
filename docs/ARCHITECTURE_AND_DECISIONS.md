@@ -42,7 +42,40 @@ coordinator stores them and publishes tracking jobs only as a contiguous
 sequence `0, 1, 2, ...`. A per-task Redis lock prevents two coordinator
 instances from dispatching the same sequence concurrently.
 
-## 3. Audio is explicitly outside the pipeline
+## 3. ZIP batch ingestion
+
+`POST /api/v1/process/archive` accepts one ZIP file and creates one independent
+pipeline task for every supported video entry. The existing single-video
+`POST /api/v1/process` response contract remains unchanged.
+
+The archive is first streamed to a temporary file with a compressed-size limit.
+It is then inspected and extracted entry by entry without loading whole videos
+into RAM. Every accepted member is written as `source.<ext>` inside its own
+UUID task directory. All Redis task hashes and ingest stream events are created
+in one transaction, so a queue failure cannot leave a partially accepted batch.
+
+Archive hardening includes:
+
+- rejection of absolute paths, `..` traversal, Windows drive paths, symlinks,
+  encrypted entries, invalid ZIP data, and duplicate member names;
+- a primary 4 GiB combined-video budget independent of video count, plus
+  configurable compressed upload, total uncompressed, per-video, member-safety,
+  free-disk reserve, and compression-ratio limits;
+- unsupported non-video files are skipped and reported to the caller;
+- temporary ZIP files and extracted task directories are removed on failure.
+
+The ZIP itself is not a pipeline task and is deleted after extraction. Each
+video continues through the normal upload source contract and has its own
+status and result endpoints. The admission response reports both compressed
+archive bytes and accepted video bytes, so capacity is observable without
+using video count as the primary constraint.
+
+Status reads use bounded retries around Redis access. A persistent temporary
+read failure is translated to HTTP 503 with `Retry-After`, preventing a
+short-lived backend dependency hiccup from surfacing as an opaque HTTP 500
+while the task itself continues normally.
+
+## 4. Audio is explicitly outside the pipeline
 
 The backend:
 
@@ -55,7 +88,7 @@ The backend:
 A container may contain FFmpeg because it is useful for video diagnostics and
 future codec support. Its presence does not mean audio is processed.
 
-## 4. Chunk boundary correctness
+## 5. Chunk boundary correctness
 
 A cut detector needs temporal context around a batch boundary. A plain split
 such as `0..63`, `64..127` can miss a transition around frames 63/64.
@@ -89,7 +122,29 @@ Output ownership rule:
 These rules prevent both missed boundary events and duplicate final events.
 The final aggregator still deduplicates equal transitions defensively.
 
-## 5. FPS decision
+### Local throughput preset
+
+The Docker Desktop mock profile keeps source FPS and source resolution intact.
+It improves throughput by reducing orchestration overhead rather than changing
+the input data:
+
+- decoded RGB tensors are capped at 80 MiB instead of 32 MiB;
+- at most two tensors are in flight, so the theoretical payload stays below
+  the 256 MiB local object-store budget;
+- ingest waits for downstream capacity before decoding the next tensor;
+- mock actors add no artificial sleep;
+- human-facing progress is persisted every two chunks instead of on every
+  stream hop, while durable completion counters are still updated atomically
+  for every chunk.
+
+For the reference 511-frame 2560x1440 and 302-frame 1280x720 videos, the
+adaptive chunker produces 73 and 12 chunks respectively, compared with 171 and
+34 under the former 32 MiB budget. This is a local orchestration optimization,
+not a claim about real model inference speed. Production values must be tuned
+against model VRAM, GPU batch size, Ray node memory, and the number of videos
+processed concurrently.
+
+## 6. FPS decision
 
 The existing legacy `preprocess.py` defaults to 25 FPS, while the team pipeline
 document describes a 30 FPS standardized dataset. Silently applying either
@@ -99,7 +154,7 @@ The backend therefore preserves source FPS and original global frame numbers.
 A model-specific worker may resample internally, but it must map every output
 back to the original video coordinate system before publishing its result.
 
-## 6. Redis Streams and delivery semantics
+## 7. Redis Streams and delivery semantics
 
 Streams:
 
@@ -127,7 +182,7 @@ Chunk writes are idempotent in Redis Lua scripts:
 This is required because Redis Streams consumer groups provide at-least-once,
 not exactly-once, processing.
 
-## 7. Ray object lifetime
+## 8. Ray object lifetime
 
 Redis stores only an opaque token and metadata. It does not store image bytes
 or a pickled Ray Client `ObjectRef`. A detached named registry actor owns the
@@ -156,7 +211,7 @@ shared-memory access is required. The upload volume must also be visible on
 that node. Do not market the development Compose topology as guaranteed
 zero-copy across arbitrary containers or machines.
 
-## 8. Failure behavior
+## 9. Failure behavior
 
 - Validation errors are returned before a task is queued.
 - Worker errors remain pending for retry and then move to `cv:dead_letters`.
@@ -171,7 +226,7 @@ chunk manifest or deterministic actor restart strategy. The present scaffold
 makes downstream handlers idempotent, but a full multi-gigabyte resumable
 decoder is intentionally not faked.
 
-## 9. Role 6 topology
+## 10. Role 6 topology
 
 The default Compose file provides:
 
@@ -190,13 +245,52 @@ The ML Dockerfile is multi-stage. Roles 3 and 4 must add their exact pinned
 PyTorch, CUDA/TensorRT-compatible libraries, model code, and weights in derived
 images. Do not install arbitrary latest GPU libraries at runtime.
 
-## 10. What the mocks do and do not do
+## 11. What the mocks do and do not do
 
 `mock_cut` returns one scene covering only the chunk valid range and no
-transitions. `mock_tracking` returns an empty track list. Their lightweight
-validation runs inside named Ray Actors, while Redis consumers remain
-orchestrators. The mock tracking actor also rejects future out-of-order chunks
-per task. They prove that the pipeline wiring works without inventing model
-accuracy or detections.
+transitions. `mock_tracking` returns an empty track list. Both validate the
+strict stream metadata without opening another Ray Client connection. Ingest
+owns the frame registry, and after Redis records tracking completion it releases
+the corresponding ObjectRef through the same client that created it. Strict
+per-task result ordering is enforced by an atomic Redis sequence plus `XADD`,
+which also makes a redelivery idempotent.
 
 They must never be enabled in production.
+
+## 11. Task-partitioned concurrency and reduced orchestration
+
+The mock profile processes different task IDs concurrently but never executes
+two messages from the same task partition at once inside a worker batch. This
+keeps stateful tracking order while allowing independent archive videos to
+advance together. Ingest dynamically limits each active video to one in-flight
+Ray tensor when several videos are running; a lone video may still use the
+configured two-slot pipeline.
+
+The coordinator no longer acquires a distributed lock and performs repeated
+read/publish/advance calls for every chunk. A single Redis Lua script persists
+the cut result, buffers its prepared tracking job, and publishes every newly
+contiguous job. Tracking completion and progress use another atomic Lua update.
+These scripts target the single Redis deployment in `compose.yaml`; a future
+Redis Cluster migration must use hash tags or move the dynamic chunk lookup to
+a cluster-safe data layout.
+
+Mock workers keep the opaque frame token unchanged but do not dereference it.
+They are stateless; per-task ordering is provided by the Redis worker partition.
+Real model workers still resolve the actual ObjectRef and must retain any
+required task-partitioned state.
+
+Final result version `1.1` includes measured queue, decode, cut, tracking,
+aggregation, orchestration/wait, and total wall-clock timings. Active stage
+measurements can overlap when multiple tasks execute concurrently and should
+not be interpreted as mutually exclusive wall-clock slices.
+
+
+### Local mock actor safety
+
+The local mock profile keeps the real bounded RGB tensor in Ray, but mock cut
+and tracking validate only the strict message metadata. The ingest process that
+created the ObjectRef also releases it after durable tracking completion. This
+removes all cross-client actor calls from the local mock path while retaining
+Object Store pressure and deterministic lifetime. Real ML workers continue to
+resolve the actual ObjectRef. `RAY_ACTOR_CALL_TIMEOUT_SECONDS` bounds owner-side
+registry calls.
