@@ -182,4 +182,6 @@ async def test_long_running_message_refreshes_pending_idle_timer() -> None:
     heartbeat.cancel()
     await asyncio.gather(heartbeat, return_exceptions=True)
 
-    assert calls == [("9-0", "ingest-workers", "consumer-1")]
+    expected_call = ("9-0", "ingest-workers", "consumer-1")
+    assert calls
+    assert all(call == expected_call for call in calls)

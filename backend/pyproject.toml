@@ -21,7 +21,7 @@ line-length = 88
 select = ["E", "F", "I", "B", "UP"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["app"]
+known-first-party = ["app", "participant_3_tracking", "participant_4_cut_detection"]
 
 [tool.black]
 line-length = 88

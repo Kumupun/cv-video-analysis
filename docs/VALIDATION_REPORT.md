@@ -2,9 +2,15 @@
 
 ## Completed in this environment
 
-- `python -m pytest -c backend/pyproject.toml backend/tests` — **67 passed**.
-- `python -m compileall -q backend/app backend/tests` — passed.
+- `python -m pytest -c backend/pyproject.toml backend/tests` — **72 passed**.
+- `python -m compileall -q backend/app backend/tests participant_3_tracking participant_4_cut_detection` — passed.
 - Python source line-length scan — no lines above 88 characters.
+- The supplied `models/weights_for_cut.pth` passes its SHA-256 manifest,
+  contains `checkpoint["net"]` with 90 state entries, and loads strictly into
+  the bundled AutoShot architecture with no missing, unexpected, or mismatched
+  tensor shapes.
+- A CPU AutoShot smoke inference over 100 RGB frames returned 100 finite
+  probabilities and completed without a random-weight fallback.
 - Parsed successfully as YAML:
   - `compose.yaml`;
   - `compose.ml.example.yaml`;
@@ -69,14 +75,17 @@ docker compose ps
 docker compose logs --tail=200
 ```
 
-Finally replace mocks with roles 3 and 4, then measure Precision/Recall/F1 for
-cuts and mAP/MOTA/IDF1 for detection/tracking on the agreed test dataset.
+Run the real `ml` profile with the supplied cut checkpoint and the agreed
+YOLO-World checkpoint, then measure Precision/Recall/F1 for cuts and
+mAP/MOTA/IDF1 for detection/tracking on the agreed test dataset.
 
 ## Throughput optimization validation
 
-- 54 backend tests pass, including task-partitioned concurrency, atomic
-  cut-to-tracking dispatch, atomic tracking progress, and final timing fields.
-- Python bytecode compilation succeeds for `backend/app` and `backend/tests`.
+- 72 backend tests pass, including checkpoint compatibility, task-partitioned
+  concurrency, atomic cut-to-tracking dispatch, atomic tracking progress, and
+  final timing fields.
+- Python bytecode compilation succeeds for backend, tests, and both participant
+  worker packages.
 - `compose.yaml` and the ML overlay parse as valid YAML.
 - Changed Python files contain no lines longer than 88 characters.
 - Docker is unavailable in the authoring environment, so the final wall-clock

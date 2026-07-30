@@ -16,10 +16,10 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements/*.txt
       - run: python -m pip install -r backend/requirements/dev.txt
-      - run: python -m ruff check --config backend/pyproject.toml backend/app backend/tests
-      - run: python -m black --check --config backend/pyproject.toml backend/app backend/tests
+      - run: python -m ruff check --config backend/pyproject.toml backend/app backend/tests participant_3_tracking participant_4_cut_detection
+      - run: python -m black --check --config backend/pyproject.toml backend/app backend/tests participant_3_tracking participant_4_cut_detection
       - run: python -m pytest -c backend/pyproject.toml backend/tests
-      - run: python -m compileall -q backend/app backend/tests
+      - run: python -m compileall -q backend/app backend/tests participant_3_tracking participant_4_cut_detection
       - run: docker compose config --quiet
       - run: docker compose -f compose.yaml -f compose.ml.example.yaml config --quiet
 

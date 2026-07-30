@@ -143,3 +143,22 @@ but real workers should populate their own processing timing and preserve
 Workers may process different `task_id` partitions concurrently. Messages for
 one task must remain sequential, and a real stateful tracking implementation
 must use one actor/state partition per task rather than one global tracker.
+
+## Integrated real workers
+
+The repository now contains contract adapters instead of standalone handwritten
+Redis loops:
+
+- `participant_4_cut_detection.worker` consumes `FrameBatchMetadata`, resolves
+  the opaque token through `RayObjectStore`, runs AutoShot in a GPU Ray Actor,
+  maps local detections back to global frames, applies valid-range ownership,
+  and publishes `CutResultMessage`;
+- `participant_3_tracking.worker` consumes only verified
+  `TrackingJobMessage`, runs one named state partition per `task_id`, resets
+  ByteTrack at scene boundaries, checkpoints tracker state in Redis, and uses
+  `publish_tracking_result_in_order` for the final stream write.
+
+Both adapters persist an internal per-chunk result cache before publishing.
+Therefore a Redis retry republishes the same result instead of advancing model
+state twice. Model actors receive the real frame tensor as a nested Ray
+ObjectRef; Redis continues to contain only the opaque `ray-object:*` token.

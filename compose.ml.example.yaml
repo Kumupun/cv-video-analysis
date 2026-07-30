@@ -1,23 +1,81 @@
-# Integration overlay for participants 3 and 4.
-# It validates contracts and GPU/container wiring. For strict local Ray
-# zero-copy, deploy decoding and ML actors on the same Ray node; see docs.
+# Real model integration overlay.
+# Start with:
+#   docker compose -f compose.yaml -f compose.ml.example.yaml --profile ml up --build
+# Do not enable the `mock` profile at the same time: both profiles use the same
+# Redis consumer groups by design.
+
+x-ml-image: &ml-image
+  image: cv-video-analysis-ml:local
+  build:
+    context: .
+    dockerfile: backend/docker/Dockerfile.ml-worker
+
+x-ml-driver: &ml-driver
+  <<: *ml-image
+  profiles: ["ml"]
+  restart: unless-stopped
+  environment:
+    APP_ENV: ${APP_ENV:-development}
+    LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    REDIS_URL: redis://redis:6379/0
+    RAY_ADDRESS: ray://ray-head:10001
+    RAY_ACTOR_CALL_TIMEOUT_SECONDS: ${RAY_ACTOR_CALL_TIMEOUT_SECONDS:-30}
+    ML_INFERENCE_TIMEOUT_SECONDS: ${ML_INFERENCE_TIMEOUT_SECONDS:-600}
+    WORKER_METRICS_PORT: 9101
+    CUT_WORKER_CONCURRENCY: ${CUT_WORKER_CONCURRENCY:-2}
+    TRACKING_WORKER_CONCURRENCY: ${TRACKING_WORKER_CONCURRENCY:-2}
+    CUT_MODEL_WEIGHTS_PATH: ${CUT_MODEL_WEIGHTS_PATH:-/models/weights_for_cut.pth}
+    CUT_MODEL_ARCH_DIR: ${CUT_MODEL_ARCH_DIR:-/models/autoshot_arch}
+    CUT_MODEL_ALLOW_DOWNLOAD: ${CUT_MODEL_ALLOW_DOWNLOAD:-false}
+    CUT_MODEL_THRESHOLD: ${CUT_MODEL_THRESHOLD:-0.55}
+    CUT_MODEL_ACTOR_RESOURCE: cut-model
+    CUT_MODEL_NUM_GPUS: ${CUT_MODEL_NUM_GPUS:-0.5}
+    TRACKING_MODEL_ID: ${TRACKING_MODEL_ID:-/models/yolov8s-world.pt}
+    TRACKING_MODEL_CLASSES: '${TRACKING_MODEL_CLASSES:-["person","vehicle"]}'
+    TRACKING_MODEL_CONFIDENCE: ${TRACKING_MODEL_CONFIDENCE:-0.25}
+    TRACKING_ACTOR_RESOURCE: tracking-model
+    TRACKING_MODEL_NUM_GPUS: ${TRACKING_MODEL_NUM_GPUS:-0.5}
+  volumes:
+    - ./models:/models:ro
+    - uploads:/data/uploads
+    - results:/data/results
+  expose:
+    - "9101"
+  depends_on:
+    redis:
+      condition: service_healthy
+    ray-head:
+      condition: service_healthy
+    ml-ray-worker:
+      condition: service_healthy
+  networks:
+    - pipeline
+
 services:
-  cut-worker:
-    build:
-      context: ./backend
-      dockerfile: docker/Dockerfile.ml-worker
-    command: ["python", "-m", "cut_worker.main"]
+  ml-ray-worker:
+    <<: *ml-image
+    profiles: ["ml"]
+    restart: unless-stopped
+    command:
+      - bash
+      - -lc
+      - >-
+        ray start --address=ray-head:6379 --block
+        --disable-usage-stats
+        --num-cpus=${ML_RAY_NODE_CPUS:-4}
+        --num-gpus=${ML_RAY_NODE_GPUS:-1}
+        --resources='{"cut-model": 1, "tracking-model": 1}'
     environment:
-      REDIS_URL: redis://redis:6379/0
-      RAY_ADDRESS: ray://ray-head:10001
-      WORKER_METRICS_PORT: 9101
-    shm_size: ${ML_WORKER_SHM_SIZE:-4gb}
-    expose: ["9101"]
-    depends_on:
-      redis:
-        condition: service_healthy
-      ray-head:
-        condition: service_healthy
+      RAY_memory_monitor_refresh_ms: ${RAY_MEMORY_MONITOR_REFRESH_MS:-250}
+      RAY_memory_usage_threshold: ${RAY_MEMORY_USAGE_THRESHOLD:-0.95}
+    volumes:
+      - ./models:/models:ro
+    shm_size: ${ML_WORKER_SHM_SIZE:-8gb}
+    healthcheck:
+      test: ["CMD-SHELL", "ray status >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
     deploy:
       resources:
         reservations:
@@ -25,29 +83,16 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    networks: [pipeline]
+    depends_on:
+      ray-head:
+        condition: service_healthy
+    networks:
+      - pipeline
+
+  cut-worker:
+    <<: *ml-driver
+    command: ["python", "-m", "participant_4_cut_detection.worker"]
 
   tracking-worker:
-    build:
-      context: ./backend
-      dockerfile: docker/Dockerfile.ml-worker
-    command: ["python", "-m", "tracking_worker.main"]
-    environment:
-      REDIS_URL: redis://redis:6379/0
-      RAY_ADDRESS: ray://ray-head:10001
-      WORKER_METRICS_PORT: 9101
-    shm_size: ${ML_WORKER_SHM_SIZE:-4gb}
-    expose: ["9101"]
-    depends_on:
-      redis:
-        condition: service_healthy
-      ray-head:
-        condition: service_healthy
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    networks: [pipeline]
+    <<: *ml-driver
+    command: ["python", "-m", "participant_3_tracking.worker"]

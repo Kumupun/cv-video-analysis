@@ -8,3 +8,16 @@ data/uploads/*
 !data/uploads/.gitkeep
 data/results/*
 !data/results/.gitkeep
+
+# Large local model artifacts
+models/*
+!models/.gitkeep
+!models/README.md
+participant_4_cut_detection/autoshot_arch/
+*.pt
+*.pth
+
+# The supplied AutoShot checkpoint is intentionally versioned for this task.
+!models/weights_for_cut.pth
+!models/SHA256SUMS
+!models/checkpoint_manifest.json
