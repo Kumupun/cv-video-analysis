@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from uuid import UUID
 
 from app.core.config import Settings
-from app.core.metrics import CHUNKS_RELEASED, TASKS_COMPLETED
+from app.core.metrics import TASKS_COMPLETED
 from app.domain.enums import TaskStage
 from app.domain.schemas import TrackingResultMessage
-from app.infrastructure.ray_store import RayObjectStore
 from app.infrastructure.redis_streams import RedisStreams, StreamMessage
-from app.infrastructure.serialization import stream_fields_to_model
 from app.infrastructure.task_repository import RedisTaskRepository
+from app.infrastructure.serialization import stream_fields_to_model
 from app.services.result_aggregation import aggregate_result
 from app.workers.common import StreamWorker, run_worker
 
@@ -20,7 +20,6 @@ class AggregationHandler:
         self.settings = settings
         self.streams = streams
         self.repository = RedisTaskRepository(streams.client, settings)
-        self.object_store = RayObjectStore(settings)
 
     async def __call__(self, message: StreamMessage) -> None:
         tracking_result = stream_fields_to_model(message.fields, TrackingResultMessage)
@@ -29,6 +28,7 @@ class AggregationHandler:
             cut_done,
             is_new,
             completed_count,
+            total,
         ) = await self.repository.mark_chunk_tracking_done(
             task_id,
             tracking_result.chunk_id,
@@ -39,38 +39,42 @@ class AggregationHandler:
                 "Tracking result arrived before a verified cut result; "
                 "refusing to aggregate"
             )
-
         if not is_new:
             return
 
-        await asyncio.to_thread(self.object_store.release, tracking_result.object_ref)
-        CHUNKS_RELEASED.inc()
-
-        status = await self.repository.get_status(task_id)
-        total = max(status.total_chunks, 1)
-        progress = 60.0 + 30.0 * min(completed_count / total, 1.0)
-        await self.repository.update_status(
-            task_id,
-            stage=(
-                TaskStage.AGGREGATING
-                if completed_count >= total
-                else TaskStage.TRACKING
-            ),
-            progress=progress,
-            message=f"Tracking completed for {completed_count}/{total} chunks",
-            tracking_completed_chunks=completed_count,
-        )
-
-        if completed_count < total:
+        if total <= 0 or completed_count < total:
             return
 
-        chunk_payloads = await self.repository.get_all_chunk_payloads(task_id)
+        aggregation_started = time.perf_counter()
+        status = await self.repository.get_status(task_id)
+        chunk_payloads = await self.repository.get_all_chunk_payloads(
+            task_id,
+            total,
+        )
         video = await self.repository.get_video_metadata(task_id)
         result = aggregate_result(
             task_id=UUID(str(task_id)),
             video=video,
             chunk_payloads=chunk_payloads,
+            created_at=status.created_at,
+            processing_started_at=status.processing_started_at,
         )
+        aggregation_ms = (time.perf_counter() - aggregation_started) * 1_000
+        timings = result.timings.model_copy(
+            update={
+                "aggregation_ms": aggregation_ms,
+                "orchestration_wait_ms": max(
+                    0.0,
+                    result.timings.total_ms
+                    - result.timings.queue_wait_ms
+                    - result.timings.decoding_ms
+                    - result.timings.cut_detection_ms
+                    - result.timings.tracking_ms
+                    - aggregation_ms,
+                ),
+            }
+        )
+        result = result.model_copy(update={"timings": timings})
         await self.repository.save_result(task_id, result)
         await self.repository.update_status(
             task_id,
@@ -89,6 +93,8 @@ def factory(settings: Settings, streams: RedisStreams) -> StreamWorker:
         handler=AggregationHandler(settings, streams),
         settings=settings,
         streams=streams,
+        max_concurrency=settings.aggregator_worker_concurrency,
+        partition_by_task=True,
     )
 
 
