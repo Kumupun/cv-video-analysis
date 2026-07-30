@@ -154,7 +154,10 @@ class ArchiveUploadService:
                 candidates, skipped, accepted_size_bytes = self._collect_candidates(
                     members
                 )
-                self._validate_available_disk_space(accepted_size_bytes)
+                self._validate_available_disk_space(
+                    accepted_size_bytes,
+                    archive_size_bytes,
+                )
 
                 videos = [
                     self._extract_video_member(
@@ -288,9 +291,19 @@ class ArchiveUploadService:
                 f"Suspicious ZIP compression ratio for entry: {member.filename}"
             )
 
-    def _validate_available_disk_space(self, accepted_size_bytes: int) -> None:
+    def _validate_available_disk_space(
+        self,
+        accepted_size_bytes: int,
+        archive_size_bytes: int,
+    ) -> None:
         available = shutil.disk_usage(self._settings.upload_dir).free
-        required = accepted_size_bytes + self._settings.archive_disk_reserve_bytes
+        # The compressed temporary ZIP remains on disk while accepted members
+        # are extracted, so both copies must fit at the same time.
+        required = (
+            accepted_size_bytes
+            + archive_size_bytes
+            + self._settings.archive_disk_reserve_bytes
+        )
         if available < required:
             raise UploadStorageLimitError(
                 "Not enough free disk space to extract the accepted videos safely"

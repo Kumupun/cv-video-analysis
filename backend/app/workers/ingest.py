@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 import time
 from pathlib import Path
 from uuid import UUID
@@ -20,7 +21,7 @@ from app.infrastructure.redis_streams import RedisStreams, StreamMessage
 from app.infrastructure.serialization import model_to_stream_fields
 from app.infrastructure.task_repository import RedisTaskRepository
 from app.services.remote_fetcher import RemoteVideoFetcher
-from app.services.video_decoder import DecodedBatch, DecordVideoDecoder
+from app.services.video_decoder import DecodedBatch, FFmpegVideoDecoder
 from app.workers.common import StreamWorker, TerminalWorkerError, run_worker
 
 logger = logging.getLogger(__name__)
@@ -87,6 +88,7 @@ class IngestHandler:
             return
 
         started = time.perf_counter()
+        decoder: FFmpegVideoDecoder | None = None
         try:
             source = await self.repository.get_source(task_id)
             video_path = await self._resolve_video_path(task_id, source)
@@ -97,16 +99,18 @@ class IngestHandler:
                 message="Decoding RGB video frames",
             )
 
-            decoder = DecordVideoDecoder(
+            decoder = FFmpegVideoDecoder(
                 video_path,
                 self.settings.chunk_size_frames,
                 self.settings.chunk_overlap_frames,
                 self.settings.max_decoded_chunk_bytes,
+                decode_threads=self.settings.ffmpeg_decode_threads,
+                probe_timeout_seconds=self.settings.video_probe_timeout_seconds,
             )
             metadata_started = time.perf_counter()
             metadata = await asyncio.wait_for(
                 asyncio.to_thread(decoder.open),
-                timeout=self.settings.decode_batch_timeout_seconds,
+                timeout=self.settings.video_probe_timeout_seconds,
             )
             metadata_probe_ms = (time.perf_counter() - metadata_started) * 1_000
             await self.repository.save_video_metadata(task_id, metadata)
@@ -137,9 +141,9 @@ class IngestHandler:
                     return
 
                 decode_started = time.perf_counter()
-                batch = await asyncio.wait_for(
-                    asyncio.to_thread(decoder.decode_batch, chunk_index),
-                    timeout=self.settings.decode_batch_timeout_seconds,
+                batch = await self._decode_batch_with_timeout(
+                    decoder,
+                    chunk_index,
                 )
                 decode_ms = (time.perf_counter() - decode_started) * 1_000
                 if published_count == 0 and chunk_index == 0:
@@ -163,10 +167,9 @@ class IngestHandler:
                     is_last=batch.is_last,
                     decode_ms=decode_ms,
                 )
-                # The Ray Object Store now owns the tensor. Drop the local
-                # NumPy reference before waiting for downstream capacity;
-                # otherwise each concurrent video keeps its previous 64–80 MiB
-                # batch alive while decoding the next one.
+                # The Ray Object Store now owns the tensor. All values needed
+                # below are already copied into the lightweight metadata model,
+                # so release the large local NumPy batch before the next decode.
                 del batch
 
                 is_new = False
@@ -177,7 +180,7 @@ class IngestHandler:
                         stream=self.settings.stream_video_chunks,
                         stream_fields=model_to_stream_fields(payload),
                         object_ref=object_ref,
-                        chunk_index=batch.chunk_index,
+                        chunk_index=payload.chunk_index,
                     )
                 finally:
                     if not is_new:
@@ -213,6 +216,7 @@ class IngestHandler:
                 total_chunks,
                 released_count,
             )
+            await self._cleanup_processed_source(task_id, video_path)
             VIDEO_DECODE_SECONDS.observe(time.perf_counter() - started)
         except DownstreamStallError as exc:
             TASKS_FAILED.labels("pipeline_stalled").inc()
@@ -226,6 +230,34 @@ class IngestHandler:
             TASKS_FAILED.labels("ingest_failed").inc()
             await self.repository.fail(task_id, code="ingest_failed", detail=str(exc))
             raise TerminalWorkerError(str(exc)) from exc
+        finally:
+            if decoder is not None:
+                try:
+                    await asyncio.to_thread(decoder.close)
+                except Exception:
+                    logger.warning(
+                        "Failed to close the FFmpeg decoder process",
+                        extra={"task_id": str(task_id)},
+                        exc_info=True,
+                    )
+
+    async def _decode_batch_with_timeout(
+        self,
+        decoder: FFmpegVideoDecoder,
+        chunk_index: int,
+    ) -> DecodedBatch:
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(decoder.decode_batch, chunk_index),
+                timeout=self.settings.decode_batch_timeout_seconds,
+            )
+        except TimeoutError as exc:
+            await asyncio.to_thread(decoder.close)
+            raise RuntimeError(
+                "FFmpeg timed out while decoding chunk "
+                f"{chunk_index} after "
+                f"{self.settings.decode_batch_timeout_seconds:g}s"
+            ) from exc
 
     def _should_publish_progress(self, completed: int, total: int) -> bool:
         return (
@@ -251,6 +283,38 @@ class IngestHandler:
 
         assert source.upload_path is not None
         return Path(source.upload_path)
+
+    async def _cleanup_processed_source(
+        self,
+        task_id: UUID,
+        video_path: Path,
+    ) -> None:
+        """Remove a completed task's extracted source from the upload volume."""
+
+        upload_root = self.settings.upload_dir.resolve()
+        task_dir = video_path.resolve().parent
+        if task_dir == upload_root or upload_root not in task_dir.parents:
+            logger.warning(
+                "Refusing to remove a source outside its task upload directory",
+                extra={
+                    "task_id": str(task_id),
+                    "video_path": str(video_path),
+                },
+            )
+            return
+        try:
+            await asyncio.to_thread(shutil.rmtree, task_dir)
+        except FileNotFoundError:
+            return
+        except Exception:
+            logger.warning(
+                "Could not remove the completed task upload directory",
+                extra={
+                    "task_id": str(task_id),
+                    "task_dir": str(task_dir),
+                },
+                exc_info=True,
+            )
 
     async def _advance_stage_if_needed(
         self,
