@@ -80,13 +80,14 @@ while the task itself continues normally.
 The backend:
 
 - rejects an uploaded or remote resource whose MIME type is `audio/*`;
-- opens only the RGB video stream through Decord;
+- opens only the first RGB video stream through FFmpeg;
 - never extracts, stores, queues, or analyzes an audio track;
 - never changes stage from video processing to an audio stage because such a
   stage does not exist in the state machine.
 
-A container may contain FFmpeg because it is useful for video diagnostics and
-future codec support. Its presence does not mean audio is processed.
+FFmpeg is the bounded streaming decoder. The command maps only `0:v:0` and
+explicitly disables audio, subtitle and data streams, so audio is never queued
+or analyzed.
 
 ## 5. Chunk boundary correctness
 
@@ -128,10 +129,14 @@ The Docker Desktop mock profile keeps source FPS and source resolution intact.
 It improves throughput by reducing orchestration overhead rather than changing
 the input data:
 
-- decoded RGB tensors are capped at 80 MiB instead of 32 MiB;
-- at most two tensors are in flight, so the theoretical payload stays below
+- decoded RGB tensors are capped at 80 MiB;
+- FFmpeg writes one chunk at a time into a preallocated NumPy buffer and exits
+  after each video, preventing native decoder caches from growing with duration;
+- archive entries are queued and one video is decoded at a time on Docker
+  Desktop, while downstream stages remain concurrent;
+- at most two tensors are in flight, so the theoretical Ray payload stays below
   the 256 MiB local object-store budget;
-- ingest waits for downstream capacity before decoding the next tensor;
+- ingest waits for downstream capacity before reading the next tensor;
 - mock actors add no artificial sleep;
 - human-facing progress is persisted every two chunks instead of on every
   stream hop, while durable completion counters are still updated atomically
@@ -140,9 +145,10 @@ the input data:
 For the reference 511-frame 2560x1440 and 302-frame 1280x720 videos, the
 adaptive chunker produces 73 and 12 chunks respectively, compared with 171 and
 34 under the former 32 MiB budget. This is a local orchestration optimization,
-not a claim about real model inference speed. Production values must be tuned
-against model VRAM, GPU batch size, Ray node memory, and the number of videos
-processed concurrently.
+not a claim about real model inference speed. Production values must be tuned against model VRAM, GPU batch size, Ray node
+memory, and the number of separately scaled ingest processes. Increasing
+coroutine concurrency inside one decoder process is not the recommended scaling
+mechanism.
 
 ## 6. FPS decision
 

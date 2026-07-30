@@ -59,12 +59,12 @@ API: `http://localhost:8000/docs`
 `RAY_MEMORY_MONITOR_REFRESH_MS=250`, залиште достатній запас RAM і налаштуйте
 `RAY_MEMORY_USAGE_THRESHOLD`.
 
-Локальний performance preset використовує RGB-chunk до 80 MiB і не більше двох
-одночасних chunk-ів. Два максимальні тензори займають до 160 MiB, тому
-залишають достатній запас у 256 MiB Ray Object Store. На двох референсних
-відео це дає приблизно 100 chunk-ів без зміни FPS, роздільної здатності чи
-глобальних номерів кадрів. Mock actors також не мають штучної затримки
-(`MOCK_WORKER_DELAY_MS=0`).
+Локальний preset використовує послідовний FFmpeg decoder, RGB-chunk до
+80 MiB і не більше двох Ray-об’єктів одночасно. ZIP може містити будь-яку
+кількість відео в межах сумарного 4 GiB бюджету, але ingest ставить їх у чергу
+та декодує по одному. Це не обмежує кількість задач: воно не дозволяє двом
+великим native decoder-ам одночасно заповнити RAM Docker Desktop. Cut,
+coordinator, tracking та aggregation продовжують працювати паралельно.
 
 Після зміни Ray-параметрів обов’язково повністю перестворіть stack:
 
@@ -148,8 +148,12 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\run_mock_archive.ps1
 ```
 
-За замовчуванням використовується `%USERPROFILE%\Downloads\video.zip`.
-Інший шлях можна передати параметром `-ArchivePath`.
+Без параметра відкривається системне вікно вибору ZIP. Також можна передати
+готовий шлях і очікувану кількість відео:
+
+```powershell
+.\run_mock_archive.ps1 -ArchivePath "C:\path\videos.zip" -ExpectedVideoCount 3
+```
 
 ## Моніторинг
 
@@ -170,18 +174,21 @@ docker compose --profile monitoring --profile gpu up --build
 
 ## Межі chunk-ів
 
-Backend намагається формувати до 64 унікальних кадрів на chunk і додавати
-до 16 попередніх кадрів як контекст. Фактичний розмір автоматично зменшується,
-щоб RGB-тензор не перевищував `MAX_DECODED_CHUNK_BYTES` (80 MiB у локальному
-preset). ML-воркер отримує `context_start_frame/context_end_frame` та
+Backend через окремий FFmpeg-процес послідовно формує до 64 унікальних
+кадрів на chunk і додає до 16 попередніх кадрів як контекст. Фактичний розмір
+автоматично зменшується, щоб RGB-тензор не перевищував
+`MAX_DECODED_CHUNK_BYTES` (80 MiB у локальному preset). ML-воркер отримує
+`context_start_frame/context_end_frame` та
 `valid_start_frame/valid_end_frame`. Глобальний номер кадру дорівнює
 `context_start_frame + local_index`; фінальні події дозволено публікувати лише
 для valid range.
 
-Ingest спочатку чекає вільного місця downstream і лише потім декодує наступний
-chunk. Тому великий наступний тензор не лежить у RAM одночасно з попереднім
-Ray-об’єктом під час backpressure. Відновлення ingest також може перейти прямо
-до потрібного `chunk_index`, не декодуючи повторно вже опубліковані частини.
+Ingest спочатку чекає вільного місця downstream і лише потім читає наступний
+chunk із FFmpeg stdout у наперед виділений NumPy buffer. Після завершення задачі
+FFmpeg-процес закривається, тому native codec buffers не накопичуються між
+відео. Відновлення ingest запускає точний `trim=start_frame` для потрібного
+`chunk_index`, не публікуючи вже збережені частини повторно. Redis pending-entry
+heartbeat не дає іншому consumer-у забрати довге відео під час обробки.
 
 ## Важлива примітка щодо FPS
 

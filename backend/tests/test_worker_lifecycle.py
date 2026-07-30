@@ -145,3 +145,41 @@ async def test_worker_retries_transient_redis_poll_failure(
 
     assert streams.claim_calls == 2
     assert sleep_calls == [0.5]
+
+
+@pytest.mark.asyncio
+async def test_long_running_message_refreshes_pending_idle_timer() -> None:
+    touched = asyncio.Event()
+    calls: list[tuple[str, str, str]] = []
+
+    class StreamsStub:
+        async def touch_pending(
+            self,
+            message: common.StreamMessage,
+            *,
+            group: str,
+            consumer: str,
+        ) -> None:
+            calls.append((message.event_id, group, consumer))
+            touched.set()
+
+    worker = common.StreamWorker.__new__(common.StreamWorker)
+    worker.worker_name = "ingest"
+    worker.group = "ingest-workers"
+    worker.consumer = "consumer-1"
+    worker.streams = StreamsStub()
+    worker.settings = SimpleNamespace(
+        stream_processing_heartbeat_seconds=0.001,
+    )
+    message = common.StreamMessage(
+        stream="cv:ingest_jobs",
+        event_id="9-0",
+        fields={"task_id": "task-1"},
+    )
+
+    heartbeat = asyncio.create_task(worker._heartbeat_pending(message))
+    await asyncio.wait_for(touched.wait(), timeout=1.0)
+    heartbeat.cancel()
+    await asyncio.gather(heartbeat, return_exceptions=True)
+
+    assert calls == [("9-0", "ingest-workers", "consumer-1")]

@@ -2,7 +2,7 @@
 
 ## Completed in this environment
 
-- `python -m pytest -c backend/pyproject.toml backend/tests` — **54 passed**.
+- `python -m pytest -c backend/pyproject.toml backend/tests` — **67 passed**.
 - `python -m compileall -q backend/app backend/tests` — passed.
 - Python source line-length scan — no lines above 88 characters.
 - Parsed successfully as YAML:
@@ -21,9 +21,12 @@
 - Performance tests verify memory-bounded adaptive chunking and the 80 MiB
   local default: 86 chunks for the 511-frame 2560x1440 reference and 14 chunks
   for the 302-frame 1280x720 reference, or 100 chunks combined.
-- Decoder tests verify direct random-access chunk decoding, allowing ingest to
-  wait for capacity before allocating the next RGB tensor and to skip already
-  published chunks during a retry.
+- Decoder tests verify sequential FFmpeg chunk streaming, overlap ownership,
+  exact resume from a requested chunk and fallback frame counting.
+- A direct FFmpeg integration run decoded three synthetic 720p/1080p/1440p
+  videos (1,190 frames total) with a measured peak RSS below 500 MiB.
+- Long-running Redis messages refresh their pending-entry idle time, preventing
+  duplicate auto-claim while a multi-gigabyte video is still processing.
 
 ## Not executable in this environment
 
@@ -32,7 +35,6 @@ The execution container used to prepare this archive does not provide:
 - Docker / Docker Compose;
 - Redis server or `redis-py` runtime package;
 - Ray runtime;
-- Decord;
 - NVIDIA GPU / H200 / Container Toolkit.
 
 Therefore the following are prepared but not falsely reported as executed:
@@ -41,7 +43,7 @@ Therefore the following are prepared but not falsely reported as executed:
 - `docker compose up` integration run;
 - real Redis Streams integration;
 - Ray Actor/Object Store integration;
-- Decord decoding of a real uploaded video;
+- full Docker/Ray archive processing on the target Docker Desktop host;
 - Prometheus/Grafana/DCGM live scraping;
 - H200 throughput, memory, temperature, or accuracy benchmarking.
 
