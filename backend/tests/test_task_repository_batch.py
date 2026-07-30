@@ -4,6 +4,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+
 from app.core.config import Settings
 from app.domain.enums import SourceKind
 from app.domain.schemas import VideoSource

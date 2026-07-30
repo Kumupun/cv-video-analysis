@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import prometheus_client
 import pytest
+
 from app.workers import common
 
 

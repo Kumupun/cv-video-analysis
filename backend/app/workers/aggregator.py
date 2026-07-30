@@ -9,8 +9,8 @@ from app.core.metrics import TASKS_COMPLETED
 from app.domain.enums import TaskStage
 from app.domain.schemas import TrackingResultMessage
 from app.infrastructure.redis_streams import RedisStreams, StreamMessage
-from app.infrastructure.task_repository import RedisTaskRepository
 from app.infrastructure.serialization import stream_fields_to_model
+from app.infrastructure.task_repository import RedisTaskRepository
 from app.services.result_aggregation import aggregate_result
 from app.workers.common import StreamWorker, run_worker
 

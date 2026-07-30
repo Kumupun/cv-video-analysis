@@ -57,7 +57,7 @@ class RedisTaskRepository:
         Pipeline messages use chunk IDs in the form ``<task_id>:<index>``.
         The Redis key already contains ``task_id`` as its own namespace, so
         storing that prefix a second time creates keys such as
-        ``cv:chunk:<task>:<task>:00000000``.  The contiguous-dispatch Lua
+        ``cv:chunk:<task>:<task>:00000000``. The contiguous-dispatch Lua
         script reconstructs keys as ``cv:chunk:<task>:00000000``; the old
         double prefix therefore made every lookup miss and stopped the
         pipeline immediately after the first cut result.
@@ -79,7 +79,6 @@ class RedisTaskRepository:
     @staticmethod
     def _metadata_key(task_id: UUID | str) -> str:
         return f"cv:video_metadata:{task_id}"
-
 
     async def create(self, task_id: UUID, source: VideoSource) -> TaskStatus:
         now = datetime.now(UTC)
@@ -206,9 +205,9 @@ class RedisTaskRepository:
         """Atomically patch status without overwriting concurrent counters.
 
         Cut coordination, tracking aggregation and ingest progress all mutate the
-        same Redis hash.  The previous read/modify/full-HSET implementation could
+        same Redis hash. The previous read/modify/full-HSET implementation could
         read ``tracking_completed_chunks=43``, then an aggregator incremented it
-        to 44, and finally ingest wrote the stale value 43 back.  The stream
+        to 44, and finally ingest wrote the stale value 43 back. The stream
         event was already acknowledged, so backpressure waited forever for a
         completion that had effectively been erased.
 
@@ -271,7 +270,8 @@ class RedisTaskRepository:
             elseif requested_rank < current_rank then
                 -- A late ingest/cut update must never move a task backwards.
                 stale_stage = true
-            elseif allowed[current_stage] and allowed[current_stage][requested_stage] then
+            elseif allowed[current_stage]
+                and allowed[current_stage][requested_stage] then
                 redis.call('HSET', KEYS[1], 'stage', requested_stage)
                 current_stage = requested_stage
             else
@@ -834,9 +834,7 @@ class RedisTaskRepository:
             tracking_completed_chunks=int(
                 data.get("tracking_completed_chunks", 0) or 0
             ),
-            processing_started_at=(
-                data.get("processing_started_at") or None
-            ),
+            processing_started_at=data.get("processing_started_at") or None,
             error_code=data.get("error_code") or None,
             error_detail=data.get("error_detail") or None,
         )

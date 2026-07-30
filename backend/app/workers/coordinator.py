@@ -5,11 +5,11 @@ import asyncio
 from app.core.config import Settings
 from app.domain.schemas import CutResultMessage, TrackingJobMessage
 from app.infrastructure.redis_streams import RedisStreams, StreamMessage
-from app.infrastructure.task_repository import RedisTaskRepository
 from app.infrastructure.serialization import (
     model_to_stream_fields,
     stream_fields_to_model,
 )
+from app.infrastructure.task_repository import RedisTaskRepository
 from app.workers.common import StreamWorker, run_worker
 
 

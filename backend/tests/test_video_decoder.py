@@ -2,6 +2,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+
 from app.domain.schemas import VideoMetadata
 from app.services.video_decoder import DecordVideoDecoder, VideoDecodeError
 
