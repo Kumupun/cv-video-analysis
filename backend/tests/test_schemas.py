@@ -1,6 +1,8 @@
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError
+
 from app.domain.enums import TransitionType
 from app.domain.schemas import (
     CutResultMessage,
@@ -8,7 +10,6 @@ from app.domain.schemas import (
     TrackingJobMessage,
     Transition,
 )
-from pydantic import ValidationError
 
 
 def test_hard_cut_requires_frame_and_timestamp() -> None:

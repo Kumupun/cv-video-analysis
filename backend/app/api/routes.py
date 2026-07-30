@@ -16,17 +16,56 @@ from fastapi import (
 )
 from fastapi.responses import JSONResponse
 
-from app.api.dependencies import get_repository, get_upload_service
+from app.api.dependencies import (
+    get_archive_upload_service,
+    get_repository,
+    get_upload_service,
+)
 from app.core.config import Settings, get_settings
 from app.core.metrics import TASKS_CREATED
 from app.domain.enums import SourceKind, TaskStage
-from app.domain.schemas import CreateTaskResponse, FinalResult, TaskStatus, VideoSource
+from app.domain.schemas import (
+    ArchiveTaskItem,
+    CreateArchiveTasksResponse,
+    CreateTaskResponse,
+    FinalResult,
+    SkippedArchiveFile,
+    TaskStatus,
+    VideoSource,
+)
 from app.infrastructure.serialization import model_to_stream_fields
-from app.infrastructure.task_repository import RedisTaskRepository, TaskNotFoundError
+from app.infrastructure.task_repository import (
+    RedisTaskRepository,
+    TaskNotFoundError,
+    TaskStatusUnavailableError,
+)
+from app.services.archive_upload_service import ArchiveUploadService
 from app.services.upload_service import UploadService
-from app.services.video_validation import VideoValidationError, validate_remote_url
+from app.services.video_validation import (
+    UploadSizeLimitError,
+    UploadStorageLimitError,
+    VideoValidationError,
+    validate_remote_url,
+)
 
 router = APIRouter()
+
+
+def _upload_error(exc: VideoValidationError) -> HTTPException:
+    if isinstance(exc, UploadStorageLimitError):
+        return HTTPException(
+            status_code=507,
+            detail=str(exc),
+        )
+    if isinstance(exc, UploadSizeLimitError):
+        return HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=str(exc),
+        )
+    return HTTPException(
+        status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+        detail=str(exc),
+    )
 
 
 @router.post(
@@ -72,10 +111,7 @@ async def create_process_task(
             validate_remote_url(video_url, settings)
             source = VideoSource(kind=SourceKind.URL, url=video_url)
     except VideoValidationError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail=str(exc),
-        ) from exc
+        raise _upload_error(exc) from exc
 
     try:
         await repository.create_and_enqueue(
@@ -99,6 +135,74 @@ async def create_process_task(
     )
 
 
+@router.post(
+    "/process/archive",
+    response_model=CreateArchiveTasksResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_archive_tasks(
+    repository: Annotated[RedisTaskRepository, Depends(get_repository)],
+    archive_uploads: Annotated[
+        ArchiveUploadService, Depends(get_archive_upload_service)
+    ],
+    settings: Annotated[Settings, Depends(get_settings)],
+    file: Annotated[UploadFile, File(description="ZIP archive with video files")],
+) -> CreateArchiveTasksResponse:
+    try:
+        extraction = await archive_uploads.extract(file)
+    except VideoValidationError as exc:
+        raise _upload_error(exc) from exc
+
+    queued_tasks: list[tuple[UUID, VideoSource, dict[str, str]]] = []
+    for video in extraction.videos:
+        source = VideoSource(
+            kind=SourceKind.UPLOAD,
+            upload_path=str(video.path),
+            original_filename=video.original_filename,
+            content_type=video.content_type,
+        )
+        stream_fields = model_to_stream_fields(source) | {"task_id": str(video.task_id)}
+        queued_tasks.append((video.task_id, source, stream_fields))
+
+    try:
+        await repository.create_many_and_enqueue(
+            queued_tasks,
+            settings.stream_ingest_jobs,
+        )
+    except Exception as exc:
+        await archive_uploads.cleanup(extraction)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Task queue is temporarily unavailable",
+        ) from exc
+
+    TASKS_CREATED.inc(len(extraction.videos))
+    base = settings.api_prefix
+    tasks = [
+        ArchiveTaskItem(
+            task_id=video.task_id,
+            filename=video.original_filename,
+            size_bytes=video.size_bytes,
+            status_url=f"{base}/status/{video.task_id}",
+            results_url=f"{base}/results/{video.task_id}",
+        )
+        for video in extraction.videos
+    ]
+    skipped_files = [
+        SkippedArchiveFile(filename=item.filename, reason=item.reason)
+        for item in extraction.skipped
+    ]
+    return CreateArchiveTasksResponse(
+        archive_filename=extraction.archive_filename,
+        archive_size_bytes=extraction.archive_size_bytes,
+        accepted_size_bytes=extraction.accepted_size_bytes,
+        accepted_count=len(tasks),
+        skipped_count=len(skipped_files),
+        tasks=tasks,
+        skipped_files=skipped_files,
+    )
+
+
 @router.get("/status/{task_id}", response_model=TaskStatus)
 async def get_task_status(
     task_id: UUID,
@@ -108,6 +212,12 @@ async def get_task_status(
         return await repository.get_status(task_id)
     except TaskNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Task not found") from exc
+    except TaskStatusUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Task status is temporarily unavailable; retry shortly",
+            headers={"Retry-After": "1"},
+        ) from exc
 
 
 @router.get("/results/{task_id}", response_model=FinalResult)
@@ -119,6 +229,12 @@ async def get_task_results(
         current = await repository.get_status(task_id)
     except TaskNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Task not found") from exc
+    except TaskStatusUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Task status is temporarily unavailable; retry shortly",
+            headers={"Retry-After": "1"},
+        ) from exc
     if current.stage == TaskStage.FAILED:
         raise HTTPException(
             status_code=422,

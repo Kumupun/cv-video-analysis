@@ -14,12 +14,25 @@ class VideoValidationError(ValueError):
     pass
 
 
-def validate_upload_metadata(file: UploadFile, settings: Settings) -> str:
-    filename = file.filename or "video.bin"
-    suffix = Path(filename).suffix.lower()
-    content_type = (file.content_type or "").lower()
+class UploadSizeLimitError(VideoValidationError):
+    pass
 
-    if content_type.startswith("audio/"):
+
+class UploadStorageLimitError(VideoValidationError):
+    """The upload is valid but the server lacks safe extraction space."""
+
+    pass
+
+
+def validate_video_filename(
+    filename: str,
+    settings: Settings,
+    content_type: str | None = None,
+) -> str:
+    suffix = Path(filename).suffix.lower()
+    normalized_content_type = (content_type or "").lower()
+
+    if normalized_content_type.startswith("audio/"):
         raise VideoValidationError(
             "Audio-only files are not accepted. "
             "This pipeline analyzes RGB video frames."
@@ -28,12 +41,41 @@ def validate_upload_metadata(file: UploadFile, settings: Settings) -> str:
         raise VideoValidationError(
             f"Unsupported video extension '{suffix or '<none>'}'"
         )
-    if content_type and not content_type.startswith(settings.allowed_video_mime_prefix):
-        if content_type != "application/octet-stream":
+    if normalized_content_type and not normalized_content_type.startswith(
+        settings.allowed_video_mime_prefix
+    ):
+        if normalized_content_type != "application/octet-stream":
             raise VideoValidationError(
-                f"Unsupported content type '{content_type}'. Expected a video file."
+                f"Unsupported content type '{normalized_content_type}'. "
+                "Expected a video file."
             )
     return suffix
+
+
+def validate_upload_metadata(file: UploadFile, settings: Settings) -> str:
+    return validate_video_filename(
+        file.filename or "video.bin",
+        settings=settings,
+        content_type=file.content_type,
+    )
+
+
+def validate_archive_upload_metadata(file: UploadFile) -> None:
+    filename = file.filename or "archive.bin"
+    suffix = Path(filename).suffix.lower()
+    content_type = (file.content_type or "").lower()
+    if suffix != ".zip":
+        raise VideoValidationError("Only ZIP archives are accepted by this endpoint")
+    allowed_types = {
+        "",
+        "application/octet-stream",
+        "application/x-zip-compressed",
+        "application/zip",
+    }
+    if content_type not in allowed_types:
+        raise VideoValidationError(
+            f"Unsupported content type '{content_type}'. Expected a ZIP archive."
+        )
 
 
 def validate_remote_url(url: str, settings: Settings) -> None:

@@ -1,6 +1,7 @@
+from fastapi import UploadFile
+
 from app.core.config import Settings
 from app.services.video_validation import VideoValidationError, validate_upload_metadata
-from fastapi import UploadFile
 
 
 def test_audio_upload_is_rejected() -> None:

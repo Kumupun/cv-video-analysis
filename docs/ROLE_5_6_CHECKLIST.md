@@ -3,7 +3,10 @@
 ## Role 5 — Backend / Pipeline
 
 - [x] `POST /api/v1/process` accepts exactly one file or URL.
-- [x] `GET /api/v1/status/{task_id}` returns stage and chunk progress.
+- [x] `POST /api/v1/process/archive` safely creates one task per ZIP video
+      within a 4 GiB combined-video budget.
+- [x] `GET /api/v1/status/{task_id}` returns stage and chunk progress with
+      retryable 503 fallback instead of transient 500.
 - [x] `GET /api/v1/results/{task_id}` returns 202 until ready and final JSON
       after completion.
 - [x] Audio-only resources are rejected; decoder reads RGB frames only.

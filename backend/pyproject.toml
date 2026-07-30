@@ -20,6 +20,9 @@ line-length = 88
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
 
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
 [tool.black]
 line-length = 88
 target-version = ["py311"]

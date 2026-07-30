@@ -1,6 +1,7 @@
 from itertools import pairwise
 
 import pytest
+
 from app.domain.enums import TaskStage
 from app.domain.state_machine import InvalidStageTransition, ensure_stage_transition
 

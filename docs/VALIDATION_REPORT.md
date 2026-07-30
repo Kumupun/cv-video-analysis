@@ -2,7 +2,7 @@
 
 ## Completed in this environment
 
-- `python -m pytest -c backend/pyproject.toml backend/tests` — **14 passed**.
+- `python -m pytest -c backend/pyproject.toml backend/tests` — **54 passed**.
 - `python -m compileall -q backend/app backend/tests` — passed.
 - Python source line-length scan — no lines above 88 characters.
 - Parsed successfully as YAML:
@@ -13,6 +13,17 @@
   - GitHub Actions workflow.
 - Grafana dashboard parsed successfully as JSON.
 - FastAPI/Pydantic domain and API modules import and compile.
+- ZIP batch tests cover safe extraction, skipped files, traversal rejection,
+  compression-ratio limits, combined-video-size admission, disk-reserve
+  checks, API task creation, and retryable status reads without HTTP 500.
+- Worker resilience tests cover immediate same-message retry and durable,
+  atomic tracking-result ordering across actor reconstruction/redelivery.
+- Performance tests verify memory-bounded adaptive chunking and the 80 MiB
+  local default: 86 chunks for the 511-frame 2560x1440 reference and 14 chunks
+  for the 302-frame 1280x720 reference, or 100 chunks combined.
+- Decoder tests verify direct random-access chunk decoding, allowing ingest to
+  wait for capacity before allocating the next RGB tensor and to skip already
+  published chunks during a retry.
 
 ## Not executable in this environment
 
@@ -58,3 +69,13 @@ docker compose logs --tail=200
 
 Finally replace mocks with roles 3 and 4, then measure Precision/Recall/F1 for
 cuts and mAP/MOTA/IDF1 for detection/tracking on the agreed test dataset.
+
+## Throughput optimization validation
+
+- 54 backend tests pass, including task-partitioned concurrency, atomic
+  cut-to-tracking dispatch, atomic tracking progress, and final timing fields.
+- Python bytecode compilation succeeds for `backend/app` and `backend/tests`.
+- `compose.yaml` and the ML overlay parse as valid YAML.
+- Changed Python files contain no lines longer than 88 characters.
+- Docker is unavailable in the authoring environment, so the final wall-clock
+  comparison must be measured with the local mock stack.

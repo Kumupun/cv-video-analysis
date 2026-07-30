@@ -15,6 +15,7 @@ from app.core.metrics import API_REQUESTS
 from app.infrastructure.ray_store import RayObjectStore
 from app.infrastructure.redis_streams import RedisStreams
 from app.infrastructure.task_repository import RedisTaskRepository
+from app.services.archive_upload_service import ArchiveUploadService
 from app.services.upload_service import UploadService
 
 settings = get_settings()
@@ -30,6 +31,7 @@ async def lifespan(app: FastAPI):
     app.state.streams = streams
     app.state.repository = RedisTaskRepository(streams.client, settings)
     app.state.upload_service = UploadService(settings)
+    app.state.archive_upload_service = ArchiveUploadService(settings)
     app.state.object_store = RayObjectStore(settings)
     logger.info("API dependencies initialized")
     try:

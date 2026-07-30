@@ -123,7 +123,23 @@ The aggregator owns Ray cleanup. Role 3 must not free the object.
 
 Use `XREADGROUP`; acknowledge only after output was successfully written.
 The shared worker runtime in `backend/app/workers/common.py` already implements stale
-message reclaim, retries, dead-lettering, timing metrics, and acknowledgements.
-A real worker can reuse it as the Redis-facing adapter, but model inference
-must be submitted to a Ray Actor. For stateful tracking, the actor must be
-partitioned by `task_id` and checkpoint/rebuild its state after a restart.
+message reclaim, immediate in-order retries, dead-lettering, timing metrics,
+and acknowledgements. Tracking-result publication advances a durable Redis
+chunk sequence in the same Lua operation as `XADD`, so a worker or actor
+reconstruction cannot make later chunks overtake a failed earlier chunk. A real
+worker can reuse this Redis-facing adapter, but model inference must be
+submitted to a Ray Actor. For stateful tracking, the actor must be partitioned
+by `task_id` and checkpoint/rebuild its model state after a restart.
+
+## Contract additions in pipeline version 1.1
+
+`FrameBatchMetadata` adds optional `decode_ms`. `CutResultMessage` echoes
+`decode_ms`, adds `cut_processing_ms`, and carries `is_last`. The coordinator
+copies `is_last` into `TrackingJobMessage`. `TrackingResultMessage` adds
+`tracking_processing_ms`. These fields default to zero/false for compatibility,
+but real workers should populate their own processing timing and preserve
+`is_last` unchanged.
+
+Workers may process different `task_id` partitions concurrently. Messages for
+one task must remain sequential, and a real stateful tracking implementation
+must use one actor/state partition per task rather than one global tracker.

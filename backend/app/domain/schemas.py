@@ -35,6 +35,36 @@ class CreateTaskResponse(StrictModel):
     results_url: str
 
 
+class ArchiveTaskItem(CreateTaskResponse):
+    filename: str
+    size_bytes: int = Field(gt=0)
+
+
+class SkippedArchiveFile(StrictModel):
+    filename: str
+    reason: str
+
+
+class CreateArchiveTasksResponse(StrictModel):
+    archive_filename: str
+    archive_size_bytes: int = Field(gt=0)
+    accepted_size_bytes: int = Field(gt=0)
+    accepted_count: int = Field(ge=1)
+    skipped_count: int = Field(ge=0)
+    tasks: list[ArchiveTaskItem]
+    skipped_files: list[SkippedArchiveFile] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_counts(self) -> CreateArchiveTasksResponse:
+        if self.accepted_count != len(self.tasks):
+            raise ValueError("accepted_count must match the number of tasks")
+        if self.accepted_size_bytes != sum(task.size_bytes for task in self.tasks):
+            raise ValueError("accepted_size_bytes must match the task payload sizes")
+        if self.skipped_count != len(self.skipped_files):
+            raise ValueError("skipped_count must match the number of skipped files")
+        return self
+
+
 class TaskStatus(StrictModel):
     task_id: UUID
     stage: TaskStage
@@ -42,6 +72,7 @@ class TaskStatus(StrictModel):
     message: str
     created_at: datetime
     updated_at: datetime
+    processing_started_at: datetime | None = None
     total_chunks: int = Field(default=0, ge=0)
     cut_completed_chunks: int = Field(default=0, ge=0)
     tracking_completed_chunks: int = Field(default=0, ge=0)
@@ -64,6 +95,7 @@ class FrameBatchMetadata(StrictModel):
     height: int = Field(gt=0)
     source_total_frames: int = Field(gt=0)
     is_last: bool = False
+    decode_ms: float = Field(default=0.0, ge=0.0)
     emitted_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     @model_validator(mode="after")
@@ -140,6 +172,9 @@ class CutResultMessage(StrictModel):
     valid_end_frame: int = Field(ge=0)
     transitions: list[Transition]
     scenes: list[SceneInterval]
+    is_last: bool = False
+    decode_ms: float = Field(default=0.0, ge=0.0)
+    cut_processing_ms: float = Field(default=0.0, ge=0.0)
     processed_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     @model_validator(mode="after")
@@ -186,6 +221,7 @@ class TrackingJobMessage(StrictModel):
     valid_end_frame: int = Field(ge=0)
     scenes: list[SceneInterval]
     transitions: list[Transition]
+    is_last: bool = False
     cut_verified: bool = True
 
     @model_validator(mode="after")
@@ -224,6 +260,7 @@ class TrackingResultMessage(StrictModel):
     chunk_index: int = Field(ge=0)
     object_ref: str
     tracks: list[TrackedObject]
+    tracking_processing_ms: float = Field(default=0.0, ge=0.0)
     processed_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
@@ -236,13 +273,24 @@ class VideoMetadata(StrictModel):
     codec: str | None = None
 
 
+class PipelineTimings(StrictModel):
+    queue_wait_ms: float = Field(default=0.0, ge=0.0)
+    decoding_ms: float = Field(default=0.0, ge=0.0)
+    cut_detection_ms: float = Field(default=0.0, ge=0.0)
+    tracking_ms: float = Field(default=0.0, ge=0.0)
+    aggregation_ms: float = Field(default=0.0, ge=0.0)
+    orchestration_wait_ms: float = Field(default=0.0, ge=0.0)
+    total_ms: float = Field(default=0.0, ge=0.0)
+
+
 class FinalResult(StrictModel):
     task_id: UUID
     video: VideoMetadata
     transitions: list[Transition]
     tracks: list[TrackedObject]
     completed_at: datetime
-    pipeline_version: str = "1.0"
+    timings: PipelineTimings = Field(default_factory=PipelineTimings)
+    pipeline_version: str = "1.1"
     warnings: list[str] = Field(default_factory=list)
 
 

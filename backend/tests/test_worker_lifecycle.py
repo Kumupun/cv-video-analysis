@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import prometheus_client
 import pytest
+
 from app.workers import common
 
 
@@ -54,4 +55,44 @@ async def test_run_worker_connects_redis_before_factory(
         "factory_called",
         "worker_started",
         "redis_closed",
+    ]
+
+
+def test_task_id_is_extracted_from_direct_and_serialized_messages() -> None:
+    direct = common.StreamMessage(
+        stream="cv:ingest_jobs",
+        event_id="1-0",
+        fields={"task_id": "direct-task"},
+    )
+    serialized = common.StreamMessage(
+        stream="cv:video_chunks",
+        event_id="2-0",
+        fields={"payload": '{"task_id":"payload-task"}'},
+    )
+
+    assert common._extract_task_id(direct) == "direct-task"
+    assert common._extract_task_id(serialized) == "payload-task"
+
+
+@pytest.mark.asyncio
+async def test_terminal_dead_letter_marks_task_failed() -> None:
+    calls: list[tuple[str, str, str]] = []
+
+    class RepositoryStub:
+        async def fail(self, task_id: str, *, code: str, detail: str) -> None:
+            calls.append((task_id, code, detail))
+
+    worker = common.StreamWorker.__new__(common.StreamWorker)
+    worker.worker_name = "mock-cut"
+    worker.repository = RepositoryStub()
+    message = common.StreamMessage(
+        stream="cv:video_chunks",
+        event_id="3-0",
+        fields={"payload": '{"task_id":"failed-task"}'},
+    )
+
+    await worker._mark_task_failed(message, RuntimeError("Ray actor unavailable"))
+
+    assert calls == [
+        ("failed-task", "mock_cut_failed", "Ray actor unavailable"),
     ]
