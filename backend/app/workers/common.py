@@ -62,21 +62,36 @@ class StreamWorker:
             },
         )
         while True:
-            messages = await self.streams.claim_stale(
-                stream=self.stream,
-                group=self.group,
-                consumer=self.consumer,
-            )
-            if not messages:
-                messages = await self.streams.read_group(
+            try:
+                messages = await self.streams.claim_stale(
                     stream=self.stream,
                     group=self.group,
                     consumer=self.consumer,
-                    count=max(
-                        self.settings.stream_batch_size,
-                        self.max_concurrency,
-                    ),
                 )
+                if not messages:
+                    messages = await self.streams.read_group(
+                        stream=self.stream,
+                        group=self.group,
+                        consumer=self.consumer,
+                        count=max(
+                            self.settings.stream_batch_size,
+                            self.max_concurrency,
+                        ),
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning(
+                    "Redis stream polling failed; retrying without exiting",
+                    extra={
+                        "stream": self.stream,
+                        "stage": self.worker_name,
+                    },
+                    exc_info=True,
+                )
+                await asyncio.sleep(max(self.settings.stream_retry_delay_seconds, 0.1))
+                continue
+
             if not messages:
                 continue
             await self._process_batch(messages)
@@ -115,76 +130,110 @@ class StreamWorker:
         return partitions
 
     async def _process_message(self, message: StreamMessage) -> None:
-        """Process one stream entry with immediate, in-order retries."""
+        """Process one stream entry with retries and a pending-entry heartbeat."""
 
-        while True:
-            started = time.perf_counter()
-            retry = False
-            try:
-                await self.handler(message)
-                await self.streams.ack(message, self.group)
-                await self.streams.clear_failure_counter(message)
-                return
-            except asyncio.CancelledError:
-                raise
-            except TerminalWorkerError as exc:
-                WORKER_ERRORS.labels(self.worker_name).inc()
-                logger.exception(
-                    "Terminal worker message failure",
-                    extra={
-                        "stream": message.stream,
-                        "event_id": message.event_id,
-                        "stage": self.worker_name,
-                    },
-                )
-                await self.streams.publish_dead_letter(
-                    source_message=message,
-                    worker=self.worker_name,
-                    error=str(exc),
-                )
-                await self.streams.ack(message, self.group)
-                await self.streams.clear_failure_counter(message)
-                return
-            except Exception as exc:
-                WORKER_ERRORS.labels(self.worker_name).inc()
-                logger.exception(
-                    "Worker message failed",
-                    extra={
-                        "stream": message.stream,
-                        "event_id": message.event_id,
-                        "stage": self.worker_name,
-                    },
-                )
-                attempts = await self.streams.register_failure(message)
-                if attempts >= self.settings.stream_max_delivery_attempts:
+        heartbeat = asyncio.create_task(self._heartbeat_pending(message))
+        try:
+            while True:
+                started = time.perf_counter()
+                retry = False
+                try:
+                    await self.handler(message)
+                    await self.streams.ack(message, self.group)
+                    await self.streams.clear_failure_counter(message)
+                    return
+                except asyncio.CancelledError:
+                    raise
+                except TerminalWorkerError as exc:
+                    WORKER_ERRORS.labels(self.worker_name).inc()
+                    logger.exception(
+                        "Terminal worker message failure",
+                        extra={
+                            "stream": message.stream,
+                            "event_id": message.event_id,
+                            "stage": self.worker_name,
+                        },
+                    )
                     await self.streams.publish_dead_letter(
                         source_message=message,
                         worker=self.worker_name,
                         error=str(exc),
                     )
-                    await self._mark_task_failed(message, exc)
                     await self.streams.ack(message, self.group)
                     await self.streams.clear_failure_counter(message)
                     return
+                except Exception as exc:
+                    WORKER_ERRORS.labels(self.worker_name).inc()
+                    logger.exception(
+                        "Worker message failed",
+                        extra={
+                            "stream": message.stream,
+                            "event_id": message.event_id,
+                            "stage": self.worker_name,
+                        },
+                    )
+                    attempts = await self.streams.register_failure(message)
+                    if attempts >= self.settings.stream_max_delivery_attempts:
+                        await self.streams.publish_dead_letter(
+                            source_message=message,
+                            worker=self.worker_name,
+                            error=str(exc),
+                        )
+                        await self._mark_task_failed(message, exc)
+                        await self.streams.ack(message, self.group)
+                        await self.streams.clear_failure_counter(message)
+                        return
 
+                    logger.warning(
+                        "Retrying the same message before later stream entries",
+                        extra={
+                            "stream": message.stream,
+                            "event_id": message.event_id,
+                            "stage": self.worker_name,
+                            "attempt": attempts,
+                            "max_attempts": (
+                                self.settings.stream_max_delivery_attempts
+                            ),
+                        },
+                    )
+                    retry = True
+                finally:
+                    CHUNK_PROCESS_SECONDS.labels(self.worker_name).observe(
+                        time.perf_counter() - started
+                    )
+
+                if retry:
+                    await asyncio.sleep(self.settings.stream_retry_delay_seconds)
+        finally:
+            heartbeat.cancel()
+            await asyncio.gather(heartbeat, return_exceptions=True)
+
+    async def _heartbeat_pending(self, message: StreamMessage) -> None:
+        interval = getattr(
+            self.settings,
+            "stream_processing_heartbeat_seconds",
+            15.0,
+        )
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await self.streams.touch_pending(
+                    message,
+                    group=self.group,
+                    consumer=self.consumer,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
                 logger.warning(
-                    "Retrying the same message before later stream entries",
+                    "Could not refresh the Redis pending-entry heartbeat",
                     extra={
                         "stream": message.stream,
                         "event_id": message.event_id,
                         "stage": self.worker_name,
-                        "attempt": attempts,
-                        "max_attempts": self.settings.stream_max_delivery_attempts,
                     },
+                    exc_info=True,
                 )
-                retry = True
-            finally:
-                CHUNK_PROCESS_SECONDS.labels(self.worker_name).observe(
-                    time.perf_counter() - started
-                )
-
-            if retry:
-                await asyncio.sleep(self.settings.stream_retry_delay_seconds)
 
     async def _mark_task_failed(
         self,

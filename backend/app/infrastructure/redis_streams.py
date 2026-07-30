@@ -124,6 +124,30 @@ class RedisStreams:
             for event_id, fields in items
         ]
 
+    async def touch_pending(
+        self,
+        message: StreamMessage,
+        *,
+        group: str,
+        consumer: str,
+    ) -> None:
+        """Reset the pending-entry idle timer while a long task is active.
+
+        Video ingestion may legitimately run for many minutes or hours. Without
+        this heartbeat, another consumer could auto-claim the still-running
+        message after ``stream_claim_idle_ms`` and start duplicate decoding.
+        """
+
+        await self.client.xclaim(
+            message.stream,
+            group,
+            consumer,
+            min_idle_time=0,
+            message_ids=[message.event_id],
+            idle=0,
+            justid=True,
+        )
+
     async def register_failure(self, message: StreamMessage) -> int:
         key = f"cv:delivery_attempts:{message.stream}:{message.event_id}"
         attempts = await self.client.incr(key)

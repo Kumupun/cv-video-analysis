@@ -48,6 +48,32 @@ def get_object_registry_actor(ray: Any) -> Any:
     class ObjectRegistryActor:
         def __init__(self) -> None:
             self._entries: dict[str, dict[str, Any]] = {}
+            self._reservations: set[str] = set()
+
+        def reserve(self, token: str, max_objects: int) -> str:
+            """Atomically reserve one Object Store slot before ``ray.put``.
+
+            Capacity must be claimed before the large tensor is transferred.
+            Otherwise two concurrent ingest tasks can both observe a free slot,
+            both call ``ray.put`` and temporarily overfill the local Ray node
+            before one registration is rejected.
+            """
+
+            if token in self._entries or token in self._reservations:
+                return token
+            if len(self._entries) + len(self._reservations) >= max_objects:
+                raise RuntimeError(
+                    "Ray object registry capacity reached; retry after a chunk "
+                    "is released"
+                )
+            self._reservations.add(token)
+            return token
+
+        def cancel_reservation(self, token: str) -> bool:
+            if token not in self._reservations:
+                return False
+            self._reservations.remove(token)
+            return True
 
         def register(
             self,
@@ -61,12 +87,15 @@ def get_object_registry_actor(ray: Any) -> Any:
             if not isinstance(descriptor, dict):
                 raise ValueError("Expected a frame descriptor mapping")
             if token in self._entries:
+                self._reservations.discard(token)
                 return token
-            if len(self._entries) >= max_objects:
-                raise RuntimeError(
-                    "Ray object registry capacity reached; retry after a chunk "
-                    "is released"
-                )
+            if token not in self._reservations:
+                if len(self._entries) + len(self._reservations) >= max_objects:
+                    raise RuntimeError(
+                        "Ray object registry capacity reached; retry after a chunk "
+                        "is released"
+                    )
+            self._reservations.discard(token)
             self._entries[token] = {
                 "object_ref": wrapped_ref[0],
                 "descriptor": dict(descriptor),
@@ -127,9 +156,11 @@ def get_object_registry_actor(ray: Any) -> Any:
                 ) from exc
 
         def release(self, token: str) -> bool:
+            reservation_removed = token in self._reservations
+            self._reservations.discard(token)
             entry = self._entries.pop(token, None)
             if entry is None:
-                return False
+                return reservation_removed
             object_ref = entry["object_ref"]
 
             try:
@@ -145,7 +176,7 @@ def get_object_registry_actor(ray: Any) -> Any:
             return True
 
         def count(self) -> int:
-            return len(self._entries)
+            return len(self._entries) + len(self._reservations)
 
     return ObjectRegistryActor.options(
         name=OBJECT_REGISTRY_NAME,

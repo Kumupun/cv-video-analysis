@@ -64,7 +64,9 @@ class Settings(BaseSettings):
         gt=0.0,
         le=3_600.0,
     )
+    video_probe_timeout_seconds: float = Field(default=900.0, gt=0.0)
     decode_batch_timeout_seconds: float = Field(default=120.0, gt=0.0)
+    ffmpeg_decode_threads: int = Field(default=1, ge=1, le=16)
     ray_put_timeout_seconds: float = Field(default=120.0, gt=0.0)
     ray_put_max_attempts: int = Field(default=3, ge=1, le=10)
     ray_put_retry_delay_seconds: float = Field(default=1.0, gt=0.0, le=30.0)
@@ -94,6 +96,11 @@ class Settings(BaseSettings):
     stream_block_ms: int = 2_000
     stream_batch_size: int = 8
     stream_claim_idle_ms: int = 60_000
+    stream_processing_heartbeat_seconds: float = Field(
+        default=15.0,
+        gt=0.0,
+        le=300.0,
+    )
     stream_max_delivery_attempts: int = 3
     # Retry the same message before moving to later stream entries. This is
     # essential for stateful stages such as tracking, where processing chunk
@@ -103,7 +110,11 @@ class Settings(BaseSettings):
 
     # Workers process different task IDs concurrently while preserving strict
     # ordering inside each individual video partition.
-    ingest_worker_concurrency: int = Field(default=2, ge=1, le=16)
+    # Archive entries are admitted without a count limit, but local decoding is
+    # intentionally queued one video at a time. This keeps RAM bounded for
+    # multi-gigabyte archives while downstream cut/tracking workers remain
+    # concurrent. Scale ingest as separate processes on larger hosts.
+    ingest_worker_concurrency: int = Field(default=1, ge=1, le=16)
     cut_worker_concurrency: int = Field(default=2, ge=1, le=32)
     coordinator_worker_concurrency: int = Field(default=4, ge=1, le=64)
     tracking_worker_concurrency: int = Field(default=2, ge=1, le=32)

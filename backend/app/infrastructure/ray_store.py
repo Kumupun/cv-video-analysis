@@ -26,6 +26,7 @@ class RayObjectStore:
         self._registry: Any | None = None
         self._connect_lock = threading.Lock()
         self._registry_lock = threading.Lock()
+        self._put_lock = threading.Lock()
 
     def connect(self) -> None:
         if self._ray is not None:
@@ -67,23 +68,51 @@ class RayObjectStore:
         )
 
     def put(self, value: Any) -> str:
-        object_ref = self.ray.put(value)
-        token = f"ray-object:{uuid4().hex}"
+        """Store one value without transiently exceeding global capacity.
 
-        try:
-            # Nesting prevents Ray from replacing the ObjectRef with the frame
-            # value when calling the registry actor.
-            registration_ref = self._registry_handle().register.remote(
+        The complete reserve/put/register sequence is serialized inside an
+        ingest process. The registry reservation is also actor-side, so the
+        capacity guarantee remains valid if ingest is scaled to more than one
+        process.
+        """
+
+        with self._put_lock:
+            token = f"ray-object:{uuid4().hex}"
+            registry = self._registry_handle()
+            reservation_ref = registry.reserve.remote(
                 token,
-                [object_ref],
-                self._describe_value(value),
                 self._settings.max_inflight_chunks_global,
             )
-            self._get(registration_ref)
+            self._get(reservation_ref)
+
+            object_ref: Any | None = None
+            try:
+                object_ref = self.ray.put(value)
+                # Nesting prevents Ray from replacing the ObjectRef with the
+                # frame value when calling the registry actor.
+                registration_ref = registry.register.remote(
+                    token,
+                    [object_ref],
+                    self._describe_value(value),
+                    self._settings.max_inflight_chunks_global,
+                )
+                self._get(registration_ref)
+            except Exception:
+                if object_ref is not None:
+                    self._free_unregistered_ref(object_ref)
+                self._cancel_reservation(registry, token)
+                raise
+            return token
+
+    def _cancel_reservation(self, registry: Any, token: str) -> None:
+        try:
+            cancel_ref = registry.cancel_reservation.remote(token)
+            self._get(cancel_ref)
         except Exception:
-            self._free_unregistered_ref(object_ref)
-            raise
-        return token
+            logger.warning(
+                "Failed to cancel a Ray object reservation",
+                exc_info=True,
+            )
 
     def registered_count(self) -> int:
         count_ref = self._registry_handle().count.remote()
