@@ -69,7 +69,9 @@ API: `http://localhost:8000/docs`
 великим native decoder-ам одночасно заповнити RAM Docker Desktop. Cut,
 coordinator, tracking та aggregation продовжують працювати паралельно.
 
-Після зміни Ray-параметрів обов’язково повністю перестворіть stack:
+Після зміни Ray-параметрів перестворіть stack. `storage-init` автоматично
+вирівнює права named volumes для UID `10001`, тому ручний `chown` більше не
+потрібний навіть після `down -v`:
 
 ```bash
 docker compose --profile mock down -v --remove-orphans
@@ -159,27 +161,55 @@ docker compose -f compose.yaml -f compose.ml.example.yaml \
 не обходиться. Tracking actor розділений за `task_id`, кешує повторну обробку та
 зберігає checkpoint ByteTrack-стану в Redis між chunk-ами.
 
+Для стабільної роботи з 1080p/4K AutoShot спочатку зменшує кожен RGB-кадр до
+власного входу `48x27` у форматі `uint8`, і лише після цього доповнює короткий
+chunk до 100 кадрів та переводить дані у `float32`. Це усуває багатогігабайтне
+тимчасове виділення пам’яті, через яке нативний Ray Actor міг завершуватися без
+Python traceback. Реальний ML-профіль також тримає один in-flight chunk, один
+cut-виклик і один tracking-виклик за замовчуванням; відео з ZIP залишаються
+необмеженими за кількістю в межах розмірного бюджету, але проходять memory-bounded
+чергу. Redis використовує 30-секундний socket timeout і п’ять повторів із
+exponential backoff; короткий timeout залишає stream message pending замість
+переведення всієї задачі у `failed`.
+
 Точні поля, frame mapping і правила ownership описані в
 `docs/WORKER_CONTRACTS.md`. Повний аналіз рішень та обмежень — у
 `docs/ARCHITECTURE_AND_DECISIONS.md`.
 
-## Локальний запуск усього ZIP у Windows PowerShell
+## End-to-end smoke test у Windows PowerShell
 
-Скрипт не розпаковує ZIP вручну і не вибирає лише найбільший файл. Він
-відправляє весь архів у `POST /api/v1/process/archive`, показує окремий
-`task_id` для кожного прийнятого відео та зберігає всі результати:
+Один скрипт перевіряє як окреме відео, так і ZIP-архів. Він завантажує файл,
+очікує завершення кожного `task_id`, зупиняється на першій реальній помилці та
+зберігає JSON у `smoke-results/`:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\run_mock_archive.ps1
+.\backend\scripts\smoke_test.ps1 "C:\path\sample.mp4"
 ```
 
-Без параметра відкривається системне вікно вибору ZIP. Також можна передати
-готовий шлях і очікувану кількість відео:
+Для архіву команда така сама:
 
 ```powershell
-.\run_mock_archive.ps1 -ArchivePath "C:\path\videos.zip" -ExpectedVideoCount 3
+.\backend\scripts\smoke_test.ps1 "C:\path\videos.zip"
 ```
+
+Cut-only перевірка з реальною AutoShot і mock tracking, коли
+`models/yolov8s-world.pt` ще відсутній:
+
+```powershell
+docker compose -f compose.yaml -f compose.ml.example.yaml --profile ml --profile mock up --build -d redis ray-head storage-init backend ingest-worker coordinator aggregator ml-ray-worker cut-worker mock-tracking-worker
+.\backend\scripts\smoke_test.ps1 "C:\path\sample.mp4"
+```
+
+Повний реальний pipeline після додавання tracking checkpoint:
+
+```powershell
+docker compose -f compose.yaml -f compose.ml.example.yaml --profile ml up --build -d
+.\backend\scripts\smoke_test.ps1 "C:\path\videos.zip"
+```
+
+Докладний життєвий цикл контейнерів, stream messages, Ray ObjectRef і повторного
+запуску описано в `docs/REAL_MODEL_LIFECYCLE.md`.
 
 ## Моніторинг
 
@@ -243,12 +273,12 @@ docker compose -f compose.yaml -f compose.ml.example.yaml config --quiet
 
 ## Throughput profile 1.1
 
-The local mock pipeline now keeps strict order inside one video while processing
-independent video task IDs concurrently. Default concurrency is two for ingest,
-cut, tracking, and aggregation, and four for the lightweight coordinator. When
-more than one archive video is active, ingest reserves one of the two Ray Object
-Store slots per video so the first large video cannot keep every slot while the
-next video remains queued.
+The local mock pipeline keeps strict order inside one video while processing
+independent task IDs concurrently downstream. Ingest decodes one video at a time;
+cut, tracking, and aggregation default to two workers, while the lightweight
+coordinator defaults to four. The real ML overlay deliberately reduces cut,
+tracking, and global in-flight chunk concurrency to one on memory-constrained
+Docker Desktop hosts.
 
 The cut coordinator stores the cut payload, buffers out-of-order chunks, and
 publishes all newly contiguous tracking jobs in one Redis Lua call. Tracking
