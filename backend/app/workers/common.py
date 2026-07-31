@@ -164,39 +164,52 @@ class StreamWorker:
                     return
                 except Exception as exc:
                     WORKER_ERRORS.labels(self.worker_name).inc()
-                    logger.exception(
-                        "Worker message failed",
-                        extra={
-                            "stream": message.stream,
-                            "event_id": message.event_id,
-                            "stage": self.worker_name,
-                        },
-                    )
-                    attempts = await self.streams.register_failure(message)
-                    if attempts >= self.settings.stream_max_delivery_attempts:
-                        await self.streams.publish_dead_letter(
-                            source_message=message,
-                            worker=self.worker_name,
-                            error=str(exc),
+                    if RedisStreams.is_transient_error(exc):
+                        logger.warning(
+                            "Transient Redis failure while processing a message; "
+                            "leaving it pending and retrying",
+                            extra={
+                                "stream": message.stream,
+                                "event_id": message.event_id,
+                                "stage": self.worker_name,
+                            },
+                            exc_info=True,
                         )
-                        await self._mark_task_failed(message, exc)
-                        await self.streams.ack(message, self.group)
-                        await self.streams.clear_failure_counter(message)
-                        return
+                        retry = True
+                    else:
+                        logger.exception(
+                            "Worker message failed",
+                            extra={
+                                "stream": message.stream,
+                                "event_id": message.event_id,
+                                "stage": self.worker_name,
+                            },
+                        )
+                        attempts = await self.streams.register_failure(message)
+                        if attempts >= self.settings.stream_max_delivery_attempts:
+                            await self.streams.publish_dead_letter(
+                                source_message=message,
+                                worker=self.worker_name,
+                                error=str(exc),
+                            )
+                            await self._mark_task_failed(message, exc)
+                            await self.streams.ack(message, self.group)
+                            await self.streams.clear_failure_counter(message)
+                            return
 
-                    logger.warning(
-                        "Retrying the same message before later stream entries",
-                        extra={
-                            "stream": message.stream,
-                            "event_id": message.event_id,
-                            "stage": self.worker_name,
-                            "attempt": attempts,
-                            "max_attempts": (
-                                self.settings.stream_max_delivery_attempts
-                            ),
-                        },
-                    )
-                    retry = True
+                        logger.warning(
+                            "Retrying the same message before later stream entries",
+                            extra={
+                                "stream": message.stream,
+                                "event_id": message.event_id,
+                                "stage": self.worker_name,
+                                "attempt": attempts,
+                                "max_attempts": (
+                                    self.settings.stream_max_delivery_attempts
+                                ),
+                            },
+                        )
+                        retry = True
                 finally:
                     CHUNK_PROCESS_SECONDS.labels(self.worker_name).observe(
                         time.perf_counter() - started

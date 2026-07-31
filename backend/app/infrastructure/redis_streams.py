@@ -27,14 +27,57 @@ class RedisStreams:
             return
         try:
             from redis.asyncio import Redis
+            from redis.backoff import ExponentialBackoff
+            from redis.exceptions import BusyLoadingError
+            from redis.retry import Retry
         except ImportError as exc:  # pragma: no cover - dependency guard
             raise RuntimeError("redis package is required for production mode") from exc
         self._client = Redis.from_url(
             self._settings.redis_url,
             decode_responses=True,
-            health_check_interval=15,
+            socket_connect_timeout=(
+                self._settings.redis_socket_connect_timeout_seconds
+            ),
+            socket_timeout=self._settings.redis_socket_timeout_seconds,
+            retry=Retry(
+                ExponentialBackoff(cap=1.0, base=0.1),
+                self._settings.redis_retry_attempts,
+            ),
+            retry_on_error=[BusyLoadingError],
+            socket_keepalive=True,
+            health_check_interval=(self._settings.redis_health_check_interval_seconds),
         )
         await self._client.ping()
+
+    @staticmethod
+    def is_transient_error(exc: BaseException) -> bool:
+        """Return whether a Redis/network failure should leave work pending.
+
+        Redis may briefly stop responding while Docker Desktop is under heavy
+        CPU, disk, or memory pressure. Those failures must not permanently fail
+        a video or consume the message delivery budget.
+        """
+
+        try:
+            from redis.exceptions import (
+                BusyLoadingError,
+                ConnectionError as RedisConnectionError,
+                TimeoutError as RedisTimeoutError,
+            )
+        except ImportError:  # pragma: no cover - dependency guard
+            return False
+
+        current: BaseException | None = exc
+        visited: set[int] = set()
+        while current is not None and id(current) not in visited:
+            visited.add(id(current))
+            if isinstance(
+                current,
+                (RedisTimeoutError, RedisConnectionError, BusyLoadingError),
+            ):
+                return True
+            current = current.__cause__ or current.__context__
+        return False
 
     async def close(self) -> None:
         if self._client is not None:

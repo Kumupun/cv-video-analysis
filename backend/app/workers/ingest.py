@@ -227,6 +227,14 @@ class IngestHandler:
             )
             raise TerminalWorkerError(str(exc)) from exc
         except Exception as exc:
+            if RedisStreams.is_transient_error(exc):
+                logger.warning(
+                    "Transient Redis failure interrupted ingest; the durable "
+                    "message will resume from the last published chunk",
+                    extra={"task_id": str(task_id)},
+                    exc_info=True,
+                )
+                raise
             TASKS_FAILED.labels("ingest_failed").inc()
             await self.repository.fail(task_id, code="ingest_failed", detail=str(exc))
             raise TerminalWorkerError(str(exc)) from exc
