@@ -131,3 +131,44 @@ def test_supplied_cut_checkpoint_matches_bundled_architecture() -> None:
     model = AutoShotSupernet()
     assert len(state) == 90
     model.load_state_dict(state, strict=True)
+
+
+def test_autoshot_resizes_before_temporal_padding() -> None:
+    pytest.importorskip("torch")
+    pytest.importorskip("cv2")
+    import numpy as np
+
+    from participant_4_cut_detection.autoshot_detector import AutoShotDetector
+
+    detector = AutoShotDetector.__new__(AutoShotDetector)
+    detector.frame_width = 48
+    detector.frame_height = 27
+    source = np.zeros((3, 1080, 1920, 3), dtype=np.uint8)
+
+    resized = detector._resize_rgb_frames(source)
+
+    assert resized.shape == (3, 27, 48, 3)
+    assert resized.dtype == np.uint8
+    assert resized.nbytes == 3 * 27 * 48 * 3
+
+
+def test_real_model_actor_name_is_versioned() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.cut_model_actor_name == "autoshot-cut-inference-v2"
+
+
+def test_ml_runtime_uses_one_build_owner_and_shared_uid() -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    overlay = (project_root / "compose.ml.example.yaml").read_text(encoding="utf-8")
+    base_compose = (project_root / "compose.yaml").read_text(encoding="utf-8")
+    dockerfile = (
+        project_root / "backend" / "docker" / "Dockerfile.ml-worker"
+    ).read_text(encoding="utf-8")
+
+    assert overlay.count("  build:") == 1
+    assert "ML_MAX_INFLIGHT_CHUNKS_GLOBAL:-1" in overlay
+    assert "--object-store-memory=${ML_RAY_OBJECT_STORE_BYTES:-268435456}" in overlay
+    assert "storage-init:" in base_compose
+    assert "--uid 10001 worker" in dockerfile
+    assert "--uid 10002 worker" not in dockerfile

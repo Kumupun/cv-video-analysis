@@ -135,8 +135,8 @@ def build_cut_result(
 def get_cut_inference_actor(ray: Any, settings: Settings) -> Any:
     actor_options: dict[str, Any] = {
         "num_gpus": settings.cut_model_num_gpus,
-        "max_restarts": 1,
-        "max_task_retries": 0,
+        "max_restarts": 3,
+        "max_task_retries": 1,
     }
     if settings.cut_model_actor_resource:
         actor_options["resources"] = {settings.cut_model_actor_resource: 0.001}
@@ -269,11 +269,18 @@ class RealCutHandler:
         )
         actor = await self._get_actor()
         result_ref = actor.infer.remote([object_ref])
-        return await asyncio.to_thread(
-            self.object_store.ray.get,
-            result_ref,
-            timeout=self.settings.ml_inference_timeout_seconds,
-        )
+        try:
+            return await asyncio.to_thread(
+                self.object_store.ray.get,
+                result_ref,
+                timeout=self.settings.ml_inference_timeout_seconds,
+            )
+        except Exception:
+            # A restarted named actor receives a new incarnation. Drop the local
+            # handle so the message retry resolves the current actor cleanly.
+            async with self._actor_lock:
+                self._actor = None
+            raise
 
     async def __call__(self, message: StreamMessage) -> None:
         batch = stream_fields_to_model(message.fields, FrameBatchMetadata)

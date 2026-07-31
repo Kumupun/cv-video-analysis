@@ -79,9 +79,17 @@ class AutoShotDetector:
             ) from exc
         self.model = self.model.to(self.device)
 
-    def _preprocess(self, frames: Any) -> Any:
+    def _resize_rgb_frames(self, frames: Any) -> Any:
+        """Downscale uint8 frames before padding or float conversion.
+
+        Padding a short 1080p/4K chunk to the 100-frame model window at source
+        resolution can allocate several gigabytes and make the native Ray actor
+        disappear without a Python traceback. AutoShot only consumes 48x27
+        inputs, so all temporal padding is performed after this bounded resize.
+        """
+
+        import cv2
         import numpy as np
-        import torch.nn.functional as functional
 
         array = np.asarray(frames)
         if array.ndim != 4 or array.shape[-1] != 3:
@@ -89,35 +97,57 @@ class AutoShotDetector:
         if len(array) == 0:
             raise ValueError("AutoShot received an empty frame tensor")
         if array.dtype != np.uint8:
-            array = array.astype(np.uint8, copy=False)
+            array = np.clip(array, 0, 255).astype(np.uint8, copy=False)
 
-        tensor = self._torch.from_numpy(np.ascontiguousarray(array))
-        tensor = tensor.permute(0, 3, 1, 2).float()
-        tensor = functional.interpolate(
-            tensor,
-            size=(self.frame_height, self.frame_width),
-            mode="bilinear",
-            align_corners=False,
+        resized = np.empty(
+            (len(array), self.frame_height, self.frame_width, 3),
+            dtype=np.uint8,
         )
-        return tensor.permute(1, 0, 2, 3).unsqueeze(0).to(self.device)
+        for index, frame in enumerate(array):
+            interpolation = (
+                cv2.INTER_AREA
+                if frame.shape[0] >= self.frame_height
+                and frame.shape[1] >= self.frame_width
+                else cv2.INTER_LINEAR
+            )
+            resized[index] = cv2.resize(
+                frame,
+                (self.frame_width, self.frame_height),
+                interpolation=interpolation,
+            )
+        return resized
 
-    def _window_probabilities(self, frames: Any) -> Any:
+    def _preprocess_resized(self, resized_frames: Any) -> Any:
         import numpy as np
 
-        original_length = len(frames)
+        array = np.ascontiguousarray(resized_frames)
+        tensor = self._torch.from_numpy(array).permute(0, 3, 1, 2)
+        tensor = tensor.to(
+            device=self.device,
+            dtype=self._torch.float32,
+            non_blocking=self.device.type == "cuda",
+        )
+        return tensor.permute(1, 0, 2, 3).unsqueeze(0)
+
+    def _window_probabilities_resized(self, resized_frames: Any) -> Any:
+        import numpy as np
+
+        original_length = len(resized_frames)
         if original_length <= 0:
             raise ValueError("AutoShot received an empty frame tensor")
 
         if original_length < self.inference_window:
             pad_count = self.inference_window - original_length
-            padding = np.repeat(frames[-1:], pad_count, axis=0)
-            model_frames = np.concatenate((frames, padding), axis=0)
+            padding = np.repeat(resized_frames[-1:], pad_count, axis=0)
+            model_frames = np.concatenate((resized_frames, padding), axis=0)
         else:
-            model_frames = frames[: self.inference_window]
+            model_frames = resized_frames[: self.inference_window]
 
-        tensor = self._preprocess(model_frames)
+        tensor = self._preprocess_resized(model_frames)
         with self._torch.inference_mode():
             output = self.model(tensor)
+            if self.device.type == "cuda":
+                self._torch.cuda.synchronize(self.device)
         logits = output[0] if isinstance(output, tuple) else output
         probabilities = self._torch.sigmoid(logits[0]).detach().cpu().numpy()
         return probabilities.reshape(-1)[:original_length]
@@ -125,15 +155,10 @@ class AutoShotDetector:
     def predict_probabilities(self, frames: Any) -> Any:
         import numpy as np
 
-        array = np.asarray(frames)
-        if array.ndim != 4 or array.shape[-1] != 3:
-            raise ValueError("AutoShot expects RGB frames with shape [T,H,W,C]")
-        frame_count = len(array)
-        if frame_count == 0:
-            raise ValueError("AutoShot received an empty frame tensor")
-
+        resized = self._resize_rgb_frames(frames)
+        frame_count = len(resized)
         if frame_count <= self.inference_window:
-            return self._window_probabilities(array)
+            return self._window_probabilities_resized(resized)
 
         step = self.inference_window - self.inference_overlap
         score_sum = np.zeros(frame_count, dtype=np.float32)
@@ -141,7 +166,7 @@ class AutoShotDetector:
         start = 0
         while start < frame_count:
             end = min(start + self.inference_window, frame_count)
-            window_scores = self._window_probabilities(array[start:end])
+            window_scores = self._window_probabilities_resized(resized[start:end])
             score_sum[start:end] += window_scores
             score_count[start:end] += 1.0
             if end == frame_count:

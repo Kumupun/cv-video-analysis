@@ -45,13 +45,13 @@ class YoloWorldTracker:
             self.model.predictor = None
 
     @staticmethod
-    def _to_bgr_frames(frames: Any) -> list[Any]:
+    def _to_bgr_frame(frame: Any) -> Any:
         import numpy as np
 
-        array = np.asarray(frames)
-        if array.ndim != 4 or array.shape[-1] != 3:
-            raise ValueError("YOLO-World expects RGB frames with shape [T,H,W,C]")
-        return [np.ascontiguousarray(frame[..., ::-1]) for frame in array]
+        array = np.asarray(frame)
+        if array.ndim != 3 or array.shape[-1] != 3:
+            raise ValueError("YOLO-World expects one RGB frame with shape [H,W,C]")
+        return np.ascontiguousarray(array[..., ::-1])
 
     def _install_pending_trackers(self, first_frame: Any) -> None:
         if self._pending_trackers is None:
@@ -81,21 +81,30 @@ class YoloWorldTracker:
         if scene_id != self.active_scene_id:
             self._reset_for_scene(scene_id)
 
-        bgr_frames = self._to_bgr_frames(frames)
-        if not bgr_frames:
+        import numpy as np
+
+        frame_array = np.asarray(frames)
+        if frame_array.ndim != 4 or frame_array.shape[-1] != 3:
+            raise ValueError("YOLO-World expects RGB frames with shape [T,H,W,C]")
+        if len(frame_array) == 0:
             return []
-        self._install_pending_trackers(bgr_frames[0])
-        results = self.model.track(
-            source=bgr_frames,
-            persist=True,
-            tracker="bytetrack.yaml",
-            verbose=False,
-            conf=self.confidence,
-            device=self.device,
-        )
 
         tracks: list[dict[str, Any]] = []
-        for offset, result in enumerate(results):
+        for offset, rgb_frame in enumerate(frame_array):
+            bgr_frame = self._to_bgr_frame(rgb_frame)
+            if offset == 0:
+                self._install_pending_trackers(bgr_frame)
+            results = self.model.track(
+                source=[bgr_frame],
+                persist=True,
+                tracker="bytetrack.yaml",
+                verbose=False,
+                conf=self.confidence,
+                device=self.device,
+            )
+            if not results:
+                continue
+            result = results[0]
             boxes = result.boxes
             if boxes is None or boxes.id is None:
                 continue
@@ -103,7 +112,7 @@ class YoloWorldTracker:
             raw_ids = boxes.id.int().detach().cpu().numpy()
             confidences = boxes.conf.detach().cpu().numpy()
             class_ids = boxes.cls.int().detach().cpu().numpy()
-            frame_height, frame_width = bgr_frames[offset].shape[:2]
+            frame_height, frame_width = bgr_frame.shape[:2]
 
             for box, raw_id, confidence, class_id in zip(
                 xyxy,
