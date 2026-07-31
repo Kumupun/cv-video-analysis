@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CV Pipeline — Video Analysis Console</title>
+<title>CV Pipeline — Video Analysis </title>
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
   <header class="top">
     <div class="brand">
       <span class="dot"></span>
-      <h1>video-analysis-console</h1>
+      <h1>Video-analysis</h1>
     </div>
     <span class="sub" id="status-sub">очікування завантаження</span>
     <button class="reset-btn" id="reset-btn" style="display:none;">↺ Нове відео</button>
@@ -41,10 +41,6 @@
           </div>
           <input type="text" class="class-search" id="class-search" placeholder="Пошук класу… напр. car, dog, bottle">
           <div class="class-select-options" id="class-select-options"><!-- заповнюється з COCO_CLASSES у app.js --></div>
-          <div class="class-select-note">
-            Знято позначку — клас не шукатиметься (передається як <code>keep_classes</code> у POST /process).
-            У демо-режимі так само фільтрує заглушку.
-          </div>
         </div>
       </div>
       <input type="file" id="file-input" accept="video/*">
@@ -92,10 +88,6 @@
           <div class="stat-row"><span>Тривалість</span><b id="stat-duration">—</b></div>
           <div class="stat-row"><span>FPS</span><b id="stat-fps">—</b></div>
           <div class="stat-row"><span>Треків всього</span><b id="stat-tracks">—</b></div>
-        </div>
-        <div class="note">
-          Демо-режим: bbox, track ID та межі сцен заглушка.
-          Після підключення бекенду дані підтягуються з <code>GET /results/&#123;task_id&#125;</code>.
         </div>
       </aside>
     </section>
