@@ -88,82 +88,38 @@
     });
   });
 
-  const API_BASE = '';
-
-  /**
-   * ---------------------------------------------------------------------
-   * normalizeBackendResponse — перетворює РЕАЛЬНИЙ вихід воркерів
-   */
-  const CONFIG = {
-    fields: {
-      videoMeta: 'video',          
-      cutChunks: 'cut_chunks',     
-      trackChunks: 'track_chunks', 
-    }
-  };
+  const API_BASE = 'http://127.0.0.1:8000/api/v1';
 
   function normalizeBackendResponse(raw){
-    const F = CONFIG.fields;
-    const meta = raw[F.videoMeta] || {};
-    const cutChunks = raw[F.cutChunks] || [];
-    const trackChunks = raw[F.trackChunks] || [];
+    if (!raw || typeof raw !== 'object') {
+      return { duration: 0, fps: DEFAULT_FPS, scenes: [], cuts: [], tracks: [] };
+    }
 
-    const fps = cutChunks[0]?.fps || meta.fps || DEFAULT_FPS;
+    const meta = raw.video || {};
+    const fps = meta.fps || DEFAULT_FPS;
     const width = meta.width || video.videoWidth || 1920;
     const height = meta.height || video.videoHeight || 1080;
 
-    const sceneMap = new Map();
-    cutChunks.forEach(chunk => {
-      (chunk.scenes || []).forEach(s => {
-        const existing = sceneMap.get(s.scene_id);
-        if (!existing) {
-          sceneMap.set(s.scene_id, { id: s.scene_id, start_frame: s.start_frame, end_frame: s.end_frame });
-        } else {
-          existing.start_frame = Math.min(existing.start_frame, s.start_frame);
-          existing.end_frame = Math.max(existing.end_frame, s.end_frame);
-        }
-      });
-    });
-    const scenes = Array.from(sceneMap.values())
-      .sort((a,b) => a.start_frame - b.start_frame)
-      .map(s => ({
-        start: s.start_frame / fps,
-        end: s.end_frame / fps,
-        index: s.id, 
-      }));
-
-    const rawTransitions = [];
-    cutChunks.forEach(chunk => {
-      (chunk.transitions || []).forEach(t => {
-        const inValidRange = t.frame >= chunk.valid_start_frame && t.frame <= chunk.valid_end_frame;
-        if (inValidRange) rawTransitions.push(t);
-      });
-    });
-    const seenCuts = new Set();
-    const cuts = rawTransitions.filter(t => {
-      const key = `${t.frame}-${t.type}`;
-      if (seenCuts.has(key)) return false;
-      seenCuts.add(key); return true;
-    }).sort((a,b) => a.frame - b.frame).map(t => {
-      const time = t.timestamp ?? (t.frame / fps);
+    const transitions = (Array.isArray(raw.transitions) ? raw.transitions : []).map(t => {
+      const time = t.timestamp ?? (t.frame != null ? t.frame / fps : 0);
       const hasRange = t.start_frame != null && t.end_frame != null;
       return {
         time,
-        start: hasRange ? t.start_frame / fps : time,
-        end: hasRange ? t.end_frame / fps : time,
+        start: hasRange ? (t.start_timestamp ?? t.start_frame / fps) : time,
+        end: hasRange ? (t.end_timestamp ?? t.end_frame / fps) : time,
         type: t.type,
       };
-    });
+    }).sort((a,b) => a.time - b.time);
 
     const trackMap = new Map();
-    trackChunks.forEach(chunk => {
-      (chunk.tracks || []).forEach(d => {
-        const key = `${d.scene_id}:${d.track_id}`;
-        if (!trackMap.has(key)) {
-          trackMap.set(key, { id: key, cls: d.class_name, sceneIndex: d.scene_id, detections: [] });
-        }
-        trackMap.get(key).detections.push(d);
-      });
+    (Array.isArray(raw.tracks) ? raw.tracks : []).forEach(d => {
+      const sceneId = d.scene_id ?? d.sceneId;
+      if (!sceneId) return;
+      const key = `${sceneId}:${d.track_id}`;
+      if (!trackMap.has(key)) {
+        trackMap.set(key, { id: key, cls: d.class_name, sceneIndex: sceneId, detections: [] });
+      }
+      trackMap.get(key).detections.push(d);
     });
 
     const tracks = Array.from(trackMap.values()).map(t => {
@@ -179,20 +135,39 @@
       return {
         id: t.id,
         cls: t.cls,
-        sceneIndex: t.sceneIndex, 
+        sceneIndex: t.sceneIndex,
         confidence: keyframes[0]?.confidence ?? 0.8,
         keyframes,
       };
     });
 
-    const inferredDuration = Math.max(
-      0,
-      ...cutChunks.map(c => c.valid_end_frame || 0),
-      ...tracks.flatMap(t => t.keyframes.map(k => k.t * fps)),
-    ) / fps;
-    const duration = meta.duration_sec || video.duration || inferredDuration || 12;
+    const scenesById = new Map();
+    tracks.forEach(tr => {
+      tr.keyframes.forEach(frame => {
+        const scene = scenesById.get(tr.sceneIndex) || { id: tr.sceneIndex, start_frame: frame.t * fps, end_frame: frame.t * fps };
+        scene.start_frame = Math.min(scene.start_frame, frame.t * fps);
+        scene.end_frame = Math.max(scene.end_frame, frame.t * fps);
+        scenesById.set(tr.sceneIndex, scene);
+      });
+    });
 
-    return { duration, fps, scenes, cuts, tracks };
+    let scenes = Array.from(scenesById.values())
+      .sort((a,b) => a.start_frame - b.start_frame)
+      .map(s => ({ start: s.start_frame / fps, end: s.end_frame / fps, index: s.id }));
+
+    const duration = meta.duration_seconds || raw.duration || video.duration || Math.max(
+      scenes.length ? scenes[scenes.length-1].end : 0,
+      transitions.length ? transitions[transitions.length-1].end : 0,
+      tracks.length ? Math.max(...tracks.flatMap(t => t.keyframes.map(k => k.t))) : 0,
+      DEFAULT_FPS,
+    );
+
+    if (!scenes.length && transitions.length) {
+      const boundaries = [0, ...transitions.map(c => c.start), duration].filter((v, i, arr) => arr.indexOf(v) === i).sort((a,b) => a - b);
+      scenes = boundaries.slice(0, -1).map((start, index) => ({ start, end: boundaries[index + 1], index: String(index) }));
+    }
+
+    return { duration, fps, scenes, cuts: transitions, tracks };
   }
 
   // ---------- Upload handling ----------
@@ -254,14 +229,17 @@
       form.append('classes', JSON.stringify(Array.from(selectedClasses))); // -> keep_classes на бекенді
       
       const res = await fetch(`${API_BASE}/process`, { method:'POST', body: form });
-      if (!res.ok) throw new Error(`POST /process → ${res.status}`);
+      if (!res.ok) {
+        const errorText = await res.text().catch(() => null);
+        throw new Error(`POST /process → ${res.status}${errorText ? `: ${errorText}` : ''}`);
+      }
       
       const { task_id } = await res.json();
       currentTaskId = task_id;
       pollStatus(task_id);
     } catch (err){
       console.error('[Помилка запуску обробки]', err);
-      statusSub.textContent = 'помилка з\'єднання з сервером';
+      statusSub.textContent = err.message || 'помилка запуску обробки';
       consoleEl.innerHTML += `<div class="ln" style="color:var(--cut-hard)">$ ${err.message || 'unknown error'}</div>`;
     }
   }
@@ -269,34 +247,55 @@
   async function pollStatus(taskId){
     try {
       const res = await fetch(`${API_BASE}/status/${taskId}`);
-      const data = await res.json(); 
+      if (!res.ok) {
+        const errorText = await res.text().catch(() => null);
+        throw new Error(`GET /status → ${res.status}${errorText ? `: ${errorText}` : ''}`);
+      }
+      const data = await res.json();
       updateStageUI(data.stage, data.progress);
+      statusSub.textContent = data.message || data.stage || 'обробка…';
 
-      if (data.status === 'done') {
+      if (data.stage === 'completed') {
         const resultsRes = await fetch(`${API_BASE}/results/${taskId}`);
+        if (resultsRes.status === 202) {
+          setTimeout(() => pollStatus(taskId), 1000);
+          return;
+        }
+        if (!resultsRes.ok) {
+          const errorData = await resultsRes.json().catch(() => null);
+          const errorMessage = errorData?.detail?.message || errorData?.detail || `GET /results → ${resultsRes.status}`;
+          statusSub.textContent = 'помилка обробки';
+          consoleEl.innerHTML += `<div class="ln" style="color:var(--cut-hard)">$ ${errorMessage}</div>`;
+          return;
+        }
         pipeline = normalizeBackendResponse(await resultsRes.json());
         processingView.hidden = true;
         resultView.hidden = false;
         resetBtn.style.display = 'inline-block';
         statusSub.textContent = 'готово';
         setupResultView();
-      } else if (data.status === 'error') {
+      } else if (data.stage === 'failed') {
         statusSub.textContent = 'помилка обробки';
-        consoleEl.innerHTML += `<div class="ln" style="color:var(--cut-hard)">$ ${data.message || 'unknown error'}</div>`;
+        consoleEl.innerHTML += `<div class="ln" style="color:var(--cut-hard)">$ ${data.error_detail || data.message || 'unknown error'}</div>`;
       } else {
         setTimeout(() => pollStatus(taskId), 1000);
       }
     } catch (err){
       console.warn('[втрачено зв\'язок з бекендом]', err);
+      statusSub.textContent = err.message || 'очікування відповіді сервера...';
       setTimeout(() => pollStatus(taskId), 2000);
     }
   }
 
   const STAGES = [
-    { key:'decode', label:'Decode', sub:'Decord / NVDEC' },
-    { key:'cuts', label:'Cut Detection', sub:'AutoShot' },
-    { key:'tracking', label:'Tracking', sub:'YOLO + ByteTrack' },
-    { key:'agg', label:'Aggregation', sub:'Backend' }
+    { key:'queued', label:'Queued', sub:'Waiting for processing' },
+    { key:'downloading', label:'Downloading', sub:'Ingesting video' },
+    { key:'decoding', label:'Decoding', sub:'Video decode' },
+    { key:'cut_detection', label:'Cut Detection', sub:'Scene boundary detection' },
+    { key:'tracking', label:'Tracking', sub:'Object tracking' },
+    { key:'aggregating', label:'Aggregating', sub:'Finalizing result' },
+    { key:'completed', label:'Completed', sub:'Ready to view' },
+    { key:'failed', label:'Failed', sub:'Processing error' },
   ];
 
   function updateStageUI(stageKey, progress){
