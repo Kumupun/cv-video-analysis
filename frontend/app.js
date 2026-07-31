@@ -35,8 +35,9 @@
   ];
 
   const CUSTOM_CLASSES = [
-    'drone', 'fpv_drone', 'tank', 'ifv', 'apc', 'artillery',
-    'military_truck', 'helicopter', 'military_aircraft', 'anti_aircraft_system', 'mlrs'
+    'camouflage_soldier', 'weapon', 'military_tank', 'military_truck', 
+    'military_vehicle', 'soldier', 'civilian_vehicle', 'military_artillery', 
+    'military_aircraft', 'military_warship'
   ];
 
   const CLASS_GROUPS = [
