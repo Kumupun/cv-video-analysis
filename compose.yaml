@@ -4,6 +4,10 @@ x-app-env: &app-env
   APP_ENV: ${APP_ENV:-development}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
   REDIS_URL: redis://redis:6379/0
+  REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS: ${REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS:-10}
+  REDIS_SOCKET_TIMEOUT_SECONDS: ${REDIS_SOCKET_TIMEOUT_SECONDS:-30}
+  REDIS_HEALTH_CHECK_INTERVAL_SECONDS: ${REDIS_HEALTH_CHECK_INTERVAL_SECONDS:-15}
+  REDIS_RETRY_ATTEMPTS: ${REDIS_RETRY_ATTEMPTS:-5}
   RAY_ADDRESS: ray://ray-head:10001
   RAY_gcs_server_request_timeout_seconds: ${RAY_GCS_REQUEST_TIMEOUT_SECONDS:-5}
   UPLOAD_DIR: /data/uploads
@@ -61,10 +65,26 @@ x-worker-common: &worker-common
       condition: service_healthy
     ray-head:
       condition: service_healthy
+    storage-init:
+      condition: service_completed_successfully
   networks:
     - pipeline
 
 services:
+  storage-init:
+    image: alpine:3.22
+    user: "0:0"
+    command:
+      - sh
+      - -lc
+      - mkdir -p /data/uploads /data/results && chown -R 10001:10001 /data/uploads /data/results
+    restart: "no"
+    volumes:
+      - uploads:/data/uploads
+      - results:/data/results
+    networks:
+      - pipeline
+
   redis:
     image: redis:8.2.7-alpine
     command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
@@ -129,6 +149,8 @@ services:
         condition: service_healthy
       ray-head:
         condition: service_healthy
+      storage-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/health/live"]
       interval: 10s

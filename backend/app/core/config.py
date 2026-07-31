@@ -25,6 +25,22 @@ class Settings(BaseSettings):
     api_prefix: str = "/api/v1"
 
     redis_url: str = "redis://redis:6379/0"
+    redis_socket_connect_timeout_seconds: float = Field(
+        default=10.0,
+        gt=0.0,
+        le=120.0,
+    )
+    redis_socket_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0.0,
+        le=600.0,
+    )
+    redis_health_check_interval_seconds: int = Field(
+        default=15,
+        ge=0,
+        le=300,
+    )
+    redis_retry_attempts: int = Field(default=5, ge=0, le=20)
     ray_address: str = "ray://ray-head:10001"
 
     upload_dir: Path = Path("/data/uploads")
@@ -85,7 +101,7 @@ class Settings(BaseSettings):
     cut_model_arch_dir: Path = Path("/models/autoshot_arch")
     cut_model_allow_download: bool = False
     cut_model_threshold: float = Field(default=0.55, gt=0.0, lt=1.0)
-    cut_model_actor_name: str = "autoshot-cut-inference"
+    cut_model_actor_name: str = "autoshot-cut-inference-v2"
     cut_model_actor_resource: str = "cut-model"
     cut_model_num_gpus: float = Field(default=0.5, ge=0.0, le=8.0)
 

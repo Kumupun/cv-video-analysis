@@ -31,7 +31,7 @@ COPY participant_3_tracking /worker/participant_3_tracking
 COPY participant_4_cut_detection /worker/participant_4_cut_detection
 
 RUN mkdir -p /models /data/uploads /data/results \
-    && useradd --create-home --uid 10002 worker \
+    && useradd --create-home --uid 10001 worker \
     && chown -R worker:worker /worker /models /data
 
 USER worker

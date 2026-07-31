@@ -12,3 +12,5 @@ models/*
 frontend
 monitoring
 *.zip
+
+smoke-results
