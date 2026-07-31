@@ -94,7 +94,7 @@
   // API_BASE — лише префікс URL для цих викликів:
   //   '' (порожньо)            — same-origin, коли FastAPI роздає і фронтенд, і API
   //   'http://localhost:8000'  — якщо бекенд на іншому хості/порті (тоді потрібен CORS)
-  const DEMO_MODE = true;
+  const DEMO_MODE = false;
   const API_BASE = '';
 
   /**
