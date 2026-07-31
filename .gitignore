@@ -21,5 +21,6 @@ participant_4_cut_detection/autoshot_arch/
 !models/weights_for_cut.pth
 !models/SHA256SUMS
 !models/checkpoint_manifest.json
+!models/yoloe26l_military_assets.pt
 
 smoke-results/

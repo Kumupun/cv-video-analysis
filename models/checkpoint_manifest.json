@@ -6,5 +6,37 @@
   "sha256": "3e85290546ce6d32f4a3581ec2cae87aedd2402246a0d46b4d361a330b4b1fa6",
   "checkpoint_root_key": "net",
   "state_dict_entries": 90,
-  "bundled_architecture": "participant_4_cut_detection/autoshot_architecture.py"
+  "bundled_architecture": "participant_4_cut_detection/autoshot_architecture.py",
+  "tracking_checkpoint": {
+    "artifact": "Custom YOLOE-26L military-assets detection checkpoint",
+    "source_filename": "best (1).pt",
+    "project_filename": "models/yoloe26l_military_assets.pt",
+    "size_bytes": 210772932,
+    "sha256": "490452b6652f6add750fc4ed4a70255006b91457555e5ffb69fd9c7e10724d4c",
+    "model_class": "ultralytics.nn.tasks.YOLOEModel",
+    "yaml_file": "yoloe-26l.yaml",
+    "ultralytics_version": "8.4.112",
+    "training_image_size": 960,
+    "classes": [
+      "camouflage_soldier",
+      "weapon",
+      "military_tank",
+      "military_truck",
+      "military_vehicle",
+      "civilian",
+      "soldier",
+      "civilian_vehicle",
+      "military_artillery",
+      "trench",
+      "military_aircraft",
+      "military_warship"
+    ],
+    "validation_metrics": {
+      "precision_b": 0.71164,
+      "recall_b": 0.60023,
+      "map50_b": 0.63323,
+      "map50_95_b": 0.43522
+    },
+    "license_from_checkpoint": "AGPL-3.0 (https://ultralytics.com/license)"
+  }
 }
