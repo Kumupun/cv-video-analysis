@@ -61,7 +61,11 @@ class RedisStreams:
         try:
             from redis.exceptions import (
                 BusyLoadingError,
+            )
+            from redis.exceptions import (
                 ConnectionError as RedisConnectionError,
+            )
+            from redis.exceptions import (
                 TimeoutError as RedisTimeoutError,
             )
         except ImportError:  # pragma: no cover - dependency guard
