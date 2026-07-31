@@ -1,0 +1,10 @@
+{
+  "artifact": "AutoShot cut-detection checkpoint",
+  "source_filename": "ckpt_0_200_0(2).pth",
+  "project_filename": "models/weights_for_cut.pth",
+  "size_bytes": 57243097,
+  "sha256": "3e85290546ce6d32f4a3581ec2cae87aedd2402246a0d46b4d361a330b4b1fa6",
+  "checkpoint_root_key": "net",
+  "state_dict_entries": 90,
+  "bundled_architecture": "participant_4_cut_detection/autoshot_architecture.py"
+}

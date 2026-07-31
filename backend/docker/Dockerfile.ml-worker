@@ -1,45 +1,40 @@
-ARG CUDA_VERSION=12.9.2
-FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04 AS builder
+ARG PYTORCH_IMAGE=pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
+FROM ${PYTORCH_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_NO_CACHE_DIR=1
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-       python3 python3-pip python3-venv \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /build
-COPY requirements /build/requirements
-RUN python3 -m venv /opt/venv \
-    && /opt/venv/bin/pip install --upgrade pip \
-    && /opt/venv/bin/pip install -r requirements/runtime.txt
-
-FROM nvidia/cuda:${CUDA_VERSION}-cudnn-runtime-ubuntu24.04 AS runtime
-
-ENV DEBIAN_FRONTEND=noninteractive \
-    PATH="/opt/venv/bin:$PATH" \
+    PIP_NO_CACHE_DIR=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PYTHONPATH=/worker
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       python3 python3-venv ffmpeg libglib2.0-0 \
+       ffmpeg libglib2.0-0 libgl1 curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /worker
-COPY --from=builder /opt/venv /opt/venv
-COPY app /worker/app
-COPY pyproject.toml /worker/pyproject.toml
 
-RUN useradd --create-home --uid 10002 worker \
-    && chown -R worker:worker /worker
+COPY backend/requirements /worker/backend-requirements
+RUN python -m pip install --upgrade pip \
+    && python -m pip install -r /worker/backend-requirements/runtime.txt
+
+COPY participant_3_tracking/requirements.txt /tmp/tracking-requirements.txt
+COPY participant_4_cut_detection/requirements.txt /tmp/cut-requirements.txt
+RUN python -m pip install \
+      -r /tmp/tracking-requirements.txt \
+      -r /tmp/cut-requirements.txt
+
+COPY backend/app /worker/app
+COPY backend/pyproject.toml /worker/backend/pyproject.toml
+COPY participant_3_tracking /worker/participant_3_tracking
+COPY participant_4_cut_detection /worker/participant_4_cut_detection
+
+RUN mkdir -p /models /data/uploads /data/results \
+    && useradd --create-home --uid 10001 worker \
+    && chown -R worker:worker /worker /models /data
 
 USER worker
 EXPOSE 9101
 
-# Participants 3 and 4 copy their package/weights in a derived image and
-# replace this command. Pin their PyTorch/TensorRT versions to this CUDA base.
-CMD ["python", "-c", "raise SystemExit('Set the real ML worker command')"]
+CMD ["python", "-c", "raise SystemExit('Set an ML service command')"]

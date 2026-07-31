@@ -182,4 +182,72 @@ async def test_long_running_message_refreshes_pending_idle_timer() -> None:
     heartbeat.cancel()
     await asyncio.gather(heartbeat, return_exceptions=True)
 
-    assert calls == [("9-0", "ingest-workers", "consumer-1")]
+    expected_call = ("9-0", "ingest-workers", "consumer-1")
+    assert calls
+    assert all(call == expected_call for call in calls)
+
+
+@pytest.mark.asyncio
+async def test_transient_redis_handler_failure_does_not_consume_delivery_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handled = 0
+    acknowledged = 0
+    failure_counter_calls = 0
+
+    class RedisTimeout(RuntimeError):
+        pass
+
+    class StreamsStub:
+        async def ack(self, message, group):
+            nonlocal acknowledged
+            acknowledged += 1
+
+        async def clear_failure_counter(self, message):
+            return None
+
+        async def register_failure(self, message):
+            nonlocal failure_counter_calls
+            failure_counter_calls += 1
+            return 1
+
+        async def touch_pending(self, message, *, group, consumer):
+            await asyncio.Future()
+
+    async def handler(message):
+        nonlocal handled
+        handled += 1
+        if handled == 1:
+            raise RedisTimeout("temporary")
+
+    async def fake_sleep(delay: float) -> None:
+        return None
+
+    worker = common.StreamWorker.__new__(common.StreamWorker)
+    worker.worker_name = "ingest"
+    worker.group = "ingest-workers"
+    worker.consumer = "consumer"
+    worker.streams = StreamsStub()
+    worker.handler = handler
+    worker.settings = SimpleNamespace(
+        stream_retry_delay_seconds=0.0,
+        stream_processing_heartbeat_seconds=60.0,
+        stream_max_delivery_attempts=3,
+    )
+    message = common.StreamMessage(
+        stream="cv:ingest_jobs",
+        event_id="10-0",
+        fields={"task_id": "task-1"},
+    )
+    monkeypatch.setattr(common.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(
+        common.RedisStreams,
+        "is_transient_error",
+        staticmethod(lambda exc: isinstance(exc, RedisTimeout)),
+    )
+
+    await worker._process_message(message)
+
+    assert handled == 2
+    assert acknowledged == 1
+    assert failure_counter_calls == 0

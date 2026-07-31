@@ -4,6 +4,9 @@ from app.core.config import PROJECT_ROOT, Settings
 def test_local_performance_defaults_are_memory_bounded() -> None:
     settings = Settings(_env_file=None)
 
+    assert settings.redis_socket_connect_timeout_seconds == 10
+    assert settings.redis_socket_timeout_seconds == 30
+    assert settings.redis_retry_attempts == 5
     assert settings.max_decoded_chunk_bytes == 80 * 1024 * 1024
     assert settings.max_inflight_chunks_per_task == 2
     assert settings.max_inflight_chunks_global == 2

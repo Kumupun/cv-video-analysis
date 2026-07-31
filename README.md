@@ -1,6 +1,6 @@
 # CV Video Analysis
 
-Каркас ролей **5 (Backend / Pipeline Engineer)** та **6 (MLOps Engineer)** для пайплайна:
+Інтегрований бекендовий і ML-пайплайн для ролей **3 (Tracking)**, **4 (Cut Detection)**, **5 (Backend / Pipeline)** та **6 (MLOps)**:
 
 `upload/URL/ZIP batch → RGB decode → Ray Object Store → cut detection → verified tracking job → tracking → aggregation → JSON`
 
@@ -11,7 +11,7 @@
 3. Кадри не пишуться у `.jpg` і не передаються через Redis/HTTP. У Redis передається лише непрозорий токен та метадані; справжній Ray `ObjectRef` утримує named registry actor.
 4. Кожен chunk має `context range` із перекриттям і окремий `valid range`, тому склейка на межі двох батчів не губиться та не дублюється.
 5. `ObjectRef` звільняється лише після наявності результатів cut detection і tracking для конкретного chunk; повторна доставка Redis-повідомлення не спричиняє повторне очищення.
-6. `backend/app/workers/mock_cut.py` та `mock_tracking.py` — лише development-симулятори контрактів. Вони не замінюють TransNetV2, Co-DETR або ByteTrack.
+6. `backend/app/workers/mock_cut.py` та `mock_tracking.py` — лише development-симулятори контрактів. Реальний ML-профіль використовує AutoShot та YOLO-World + ByteTrack.
 
 ## Структура
 
@@ -29,19 +29,22 @@ backend/
 │       ├── aggregator.py    # tracking_results → release ObjectRef → final JSON
 │       ├── mock_cut.py      # development only
 │       └── mock_tracking.py # development only
-├── docker/                  # backend and ML-worker base images
+├── docker/                  # backend and integrated ML image
 ├── requirements/            # pinned Python dependencies
 ├── scripts/                 # smoke test
 ├── tests/                   # backend unit tests
 └── pyproject.toml           # pytest, Ruff and Black settings
+participant_3_tracking/      # YOLO-World + ByteTrack actor and Redis adapter
+participant_4_cut_detection/ # AutoShot actor and Redis adapter
+models/                      # supplied AutoShot checkpoint + optional tracking artifact
 monitoring/                  # Prometheus alerts + Grafana provisioning/dashboard
 docs/                        # рішення архітектури та контракти ролей 3/4
 data/                        # upload/result placeholders for local work
 compose.yaml                 # main development stack
-compose.ml.example.yaml      # example real ML-worker overlay
+compose.ml.example.yaml      # real GPU model overlay
 ```
 
-## Запуск зараз, поки ML-модулі інших учасників не готові
+## Mock-запуск без model artifacts
 
 ```bash
 cp .env.example .env
@@ -66,7 +69,9 @@ API: `http://localhost:8000/docs`
 великим native decoder-ам одночасно заповнити RAM Docker Desktop. Cut,
 coordinator, tracking та aggregation продовжують працювати паралельно.
 
-Після зміни Ray-параметрів обов’язково повністю перестворіть stack:
+Після зміни Ray-параметрів перестворіть stack. `storage-init` автоматично
+вирівнює права named volumes для UID `10001`, тому ручний `chown` більше не
+потрібний навіть після `down -v`:
 
 ```bash
 docker compose --profile mock down -v --remove-orphans
@@ -124,7 +129,7 @@ Mock cut worker створює одну сцену на chunk, а mock tracking 
 процес звільняє ObjectRef. Це прибирає блокування першого chunk у Docker Desktop,
 але зберігає реальний Object Store, backpressure та контроль часу життя даних.
 
-## Підключення реальних ролей 3 і 4
+## Реальні ролі 3 і 4
 
 Контракти, які вони повинні споживати/публікувати:
 
@@ -133,27 +138,78 @@ Mock cut worker створює одну сцену на chunk, а mock tracking 
 - роль 3 читає `cv:tracking_jobs` як consumer group `tracking-workers` і публікує `TrackingResultMessage` у `cv:tracking_results`;
 - aggregator збирає відповіді; ingest звільняє Ray-об’єкт після durable tracking completion.
 
-Приклад GPU-сервісів знаходиться в `compose.ml.example.yaml`. Реальні пакети/команди ролей 3 і 4 треба підставити замість `cut_worker.main` та `tracking_worker.main`.
+Інтеграція вже реалізована в `participant_4_cut_detection` та
+`participant_3_tracking`. Обидва воркери використовують спільний
+`StreamWorker`, Pydantic-схеми бекенда, stale-message reclaim, retry/DLQ і
+атомарну публікацію tracking-result. Сирий Ray `ObjectRef` не відновлюється з
+рядка: воркери отримують його через named registry та передають вкладеним
+посиланням у Ray Actor.
 
-Точні поля, frame mapping і правила ownership описані в `docs/WORKER_CONTRACTS.md`. Повний аналіз рішень та обмежень — у `docs/ARCHITECTURE_AND_DECISIONS.md`.
+AutoShot checkpoint уже доданий у `models/weights_for_cut.pth`. Для повністю
+offline tracking додайте `models/yolov8s-world.pt` згідно з `models/README.md`,
+після чого запустіть **без** профілю `mock`:
 
-## Локальний запуск усього ZIP у Windows PowerShell
+```bash
+cp .env.example .env
+docker compose -f compose.yaml -f compose.ml.example.yaml \
+  --profile ml up --build
+```
 
-Скрипт не розпаковує ZIP вручну і не вибирає лише найбільший файл. Він
-відправляє весь архів у `POST /api/v1/process/archive`, показує окремий
-`task_id` для кожного прийнятого відео та зберігає всі результати:
+`ml-ray-worker` є справжнім GPU Ray node. AutoShot і YOLO-World actors
+плануються тільки на ньому через custom resources. Cut-worker читає
+`cv:video_chunks`, а tracking-worker — лише `cv:tracking_jobs`; тому coordinator
+не обходиться. Tracking actor розділений за `task_id`, кешує повторну обробку та
+зберігає checkpoint ByteTrack-стану в Redis між chunk-ами.
+
+Для стабільної роботи з 1080p/4K AutoShot спочатку зменшує кожен RGB-кадр до
+власного входу `48x27` у форматі `uint8`, і лише після цього доповнює короткий
+chunk до 100 кадрів та переводить дані у `float32`. Це усуває багатогігабайтне
+тимчасове виділення пам’яті, через яке нативний Ray Actor міг завершуватися без
+Python traceback. Реальний ML-профіль також тримає один in-flight chunk, один
+cut-виклик і один tracking-виклик за замовчуванням; відео з ZIP залишаються
+необмеженими за кількістю в межах розмірного бюджету, але проходять memory-bounded
+чергу. Redis використовує 30-секундний socket timeout і п’ять повторів із
+exponential backoff; короткий timeout залишає stream message pending замість
+переведення всієї задачі у `failed`.
+
+Точні поля, frame mapping і правила ownership описані в
+`docs/WORKER_CONTRACTS.md`. Повний аналіз рішень та обмежень — у
+`docs/ARCHITECTURE_AND_DECISIONS.md`.
+
+## End-to-end smoke test у Windows PowerShell
+
+Один скрипт перевіряє як окреме відео, так і ZIP-архів. Він завантажує файл,
+очікує завершення кожного `task_id`, зупиняється на першій реальній помилці та
+зберігає JSON у `smoke-results/`:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\run_mock_archive.ps1
+.\backend\scripts\smoke_test.ps1 "C:\path\sample.mp4"
 ```
 
-Без параметра відкривається системне вікно вибору ZIP. Також можна передати
-готовий шлях і очікувану кількість відео:
+Для архіву команда така сама:
 
 ```powershell
-.\run_mock_archive.ps1 -ArchivePath "C:\path\videos.zip" -ExpectedVideoCount 3
+.\backend\scripts\smoke_test.ps1 "C:\path\videos.zip"
 ```
+
+Cut-only перевірка з реальною AutoShot і mock tracking, коли
+`models/yolov8s-world.pt` ще відсутній:
+
+```powershell
+docker compose -f compose.yaml -f compose.ml.example.yaml --profile ml --profile mock up --build -d redis ray-head storage-init backend ingest-worker coordinator aggregator ml-ray-worker cut-worker mock-tracking-worker
+.\backend\scripts\smoke_test.ps1 "C:\path\sample.mp4"
+```
+
+Повний реальний pipeline після додавання tracking checkpoint:
+
+```powershell
+docker compose -f compose.yaml -f compose.ml.example.yaml --profile ml up --build -d
+.\backend\scripts\smoke_test.ps1 "C:\path\videos.zip"
+```
+
+Докладний життєвий цикл контейнерів, stream messages, Ray ObjectRef і повторного
+запуску описано в `docs/REAL_MODEL_LIFECYCLE.md`.
 
 ## Моніторинг
 
@@ -198,10 +254,10 @@ heartbeat не дає іншому consumer-у забрати довге від�
 
 ```bash
 python -m pip install -r backend/requirements/dev.txt
-python -m ruff check --config backend/pyproject.toml backend/app backend/tests
-python -m black --check --config backend/pyproject.toml backend/app backend/tests
+python -m ruff check --config backend/pyproject.toml backend/app backend/tests participant_3_tracking participant_4_cut_detection
+python -m black --check --config backend/pyproject.toml backend/app backend/tests participant_3_tracking participant_4_cut_detection
 python -m pytest -c backend/pyproject.toml backend/tests
-python -m compileall -q backend/app backend/tests
+python -m compileall -q backend/app backend/tests participant_3_tracking participant_4_cut_detection
 docker compose config --quiet
 docker compose -f compose.yaml -f compose.ml.example.yaml config --quiet
 ```
@@ -210,19 +266,19 @@ docker compose -f compose.yaml -f compose.ml.example.yaml config --quiet
 
 - Compose з окремими процесами через Ray Client перевіряє контракти та порядок, але сам по собі не гарантує фізичний zero-copy між довільними контейнерами/вузлами. Для H200 decode і ML Ray Actors треба розмістити на одному Ray node; деталі є в `docs/ARCHITECTURE_AND_DECISIONS.md`.
 - Змініть пароль Grafana у `.env`.
-- Не вмикайте `mock` profile у production.
+- Не вмикайте `mock` profile у production. Перед ML-запуском перевірте bundled AutoShot checkpoint через `sha256sum -c models/SHA256SUMS` і додайте/налаштуйте tracking checkpoint згідно з `models/README.md`.
 - `ALLOW_REMOTE_URLS=false` за замовчуванням. При увімкненні URL перевіряються проти private/loopback/reserved IP для зменшення SSRF-ризику.
 - `RAY_SHM_SIZE` та `RAY_OBJECT_STORE_BYTES` треба підібрати під RAM сервера. Не задавайте їх “наосліп” як 30–50% без перевірки паралельності, розміру кадрів і запасу для ОС/воркерів.
 - Redis і Ray не публікуються назовні; зовні доступний лише FastAPI, а monitoring-порти можна закрити reverse proxy/VPN.
 
 ## Throughput profile 1.1
 
-The local mock pipeline now keeps strict order inside one video while processing
-independent video task IDs concurrently. Default concurrency is two for ingest,
-cut, tracking, and aggregation, and four for the lightweight coordinator. When
-more than one archive video is active, ingest reserves one of the two Ray Object
-Store slots per video so the first large video cannot keep every slot while the
-next video remains queued.
+The local mock pipeline keeps strict order inside one video while processing
+independent task IDs concurrently downstream. Ingest decodes one video at a time;
+cut, tracking, and aggregation default to two workers, while the lightweight
+coordinator defaults to four. The real ML overlay deliberately reduces cut,
+tracking, and global in-flight chunk concurrency to one on memory-constrained
+Docker Desktop hosts.
 
 The cut coordinator stores the cut payload, buffers out-of-order chunks, and
 publishes all newly contiguous tracking jobs in one Redis Lua call. Tracking
