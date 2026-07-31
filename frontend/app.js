@@ -35,10 +35,6 @@
     'toothbrush'
   ];
 
-  // Додаткові класи з донавчання моделі (дрони, військова техніка).
-  // ВАЖЛИВО: точні назви/написання (case, підкреслення) звірте з тим, як
-  // саме названі класи у ваших training labels — keep_classes на бекенді
-  // фільтрує по точному співпадінню рядка.
   const CUSTOM_CLASSES = [
     'drone', 'fpv_drone', 'tank', 'ifv', 'apc', 'artillery',
     'military_truck', 'helicopter', 'military_aircraft', 'anti_aircraft_system', 'mlrs'
@@ -103,106 +99,117 @@
 
   /**
    * ---------------------------------------------------------------------
-   * normalizeBackendResponse — перетворює агрегований JSON бекенду
-   * (кадри для склейок, пікселі + confidence для bbox, розбиття на батчі)
-   * у внутрішній формат { duration, scenes, cuts, tracks }.
-  
+   * normalizeBackendResponse — перетворює РЕАЛЬНИЙ вихід воркерів
+   * (Cut Detection + Tracking, по чанках) у внутрішній формат
+   * { duration, fps, scenes, cuts, tracks }.
    */
   const CONFIG = {
-    // 'xyxy' -> [x1,y1,x2,y2] (кути) | 'xywh' -> [x,y,ширина,висота]
-    bboxFormat: 'xyxy',
     fields: {
-      videoMeta: 'video',               // raw.video.{duration_sec, fps, width, height}
-      batches: 'batches',                // raw.batches[]
-      batchScenes: 'scene_boundaries',   // batch.scene_boundaries[]
-      batchTracks: 'tracks',             // batch.tracks[]
-      trackId: 'track_id',
-      trackClass: 'class',
-      detections: 'detections',          // track.detections[]
-      frame: 'frame',
-      bbox: 'bbox',
-      confidence: 'confidence',
-      cutStartFrame: 'start_frame',
-      cutEndFrame: 'end_frame',
-      cutType: 'type',                   // 'hard_cut' | 'gradual_transition'
+      videoMeta: 'video',          // raw.video.{width, height, duration_sec}
+      cutChunks: 'cut_chunks',     // raw.cut_chunks[] — сирі виходи Cut Detection воркера
+      trackChunks: 'track_chunks', // raw.track_chunks[] — сирі виходи Tracking воркера
     }
   };
 
   function normalizeBackendResponse(raw){
     const F = CONFIG.fields;
     const meta = raw[F.videoMeta] || {};
-    const fps = meta.fps || DEFAULT_FPS;
+    const cutChunks = raw[F.cutChunks] || [];
+    const trackChunks = raw[F.trackChunks] || [];
+
+    const fps = cutChunks[0]?.fps || meta.fps || DEFAULT_FPS;
     const width = meta.width || video.videoWidth || 1920;
     const height = meta.height || video.videoHeight || 1080;
-    const duration = meta.duration_sec || video.duration;
 
-    const batches = raw[F.batches] || [];
-
-    // 1. Зібрати всі межі склейок з усіх батчів в один список (дедуп)
-    const rawCuts = [];
-    batches.forEach(batch => {
-      (batch[F.batchScenes] || []).forEach(c => rawCuts.push({
-        startFrame: c[F.cutStartFrame], endFrame: c[F.cutEndFrame], type: c[F.cutType]
-      }));
+    const sceneMap = new Map();
+    cutChunks.forEach(chunk => {
+      (chunk.scenes || []).forEach(s => {
+        const existing = sceneMap.get(s.scene_id);
+        if (!existing) {
+          sceneMap.set(s.scene_id, { id: s.scene_id, start_frame: s.start_frame, end_frame: s.end_frame });
+        } else {
+          existing.start_frame = Math.min(existing.start_frame, s.start_frame);
+          existing.end_frame = Math.max(existing.end_frame, s.end_frame);
+        }
+      });
     });
-    const seen = new Set();
-    const cuts = rawCuts.filter(c => {
-      const key = `${c.startFrame}-${c.endFrame}-${c.type}`;
-      if (seen.has(key)) return false;
-      seen.add(key); return true;
-    }).sort((a,b) => a.startFrame - b.startFrame).map(c => ({
-      time: c.startFrame / fps, start: c.startFrame / fps, end: c.endFrame / fps, type: c.type
-    }));
+    const scenes = Array.from(sceneMap.values())
+      .sort((a,b) => a.start_frame - b.start_frame)
+      .map(s => ({
+        start: s.start_frame / fps,
+        end: s.end_frame / fps,
+        index: s.id, // рядковий scene_id — використовується як ключ групування нижче
+      }));
 
-    // 2. Відновити неперервні сцени з меж склейок (потрібно для sceneIndex)
-    const boundaryFrames = [0, ...cuts.map(c => c.start), duration].sort((a,b)=>a-b);
-    const scenes = [];
-    for (let i = 0; i < boundaryFrames.length - 1; i++){
-      const start = boundaryFrames[i], end = boundaryFrames[i+1];
-      if (end > start) scenes.push({ start, end, index: scenes.length });
-    }
-    const sceneIndexAtTime = t => {
-      const s = scenes.find(s => t >= s.start && t <= s.end);
-      return s ? s.index : Math.max(0, scenes.length - 1);
-    };
+    const rawTransitions = [];
+    cutChunks.forEach(chunk => {
+      (chunk.transitions || []).forEach(t => {
+        const inValidRange = t.frame >= chunk.valid_start_frame && t.frame <= chunk.valid_end_frame;
+        if (inValidRange) rawTransitions.push(t);
+      });
+    });
+    const seenCuts = new Set();
+    const cuts = rawTransitions.filter(t => {
+      const key = `${t.frame}-${t.type}`;
+      if (seenCuts.has(key)) return false;
+      seenCuts.add(key); return true;
+    }).sort((a,b) => a.frame - b.frame).map(t => {
+      // TODO: приклад містить лише hard_cut (миттєвий, один frame). Якщо
+      // gradual_transition матиме start_frame/end_frame замість одного
+      // frame — розкоментувати/підправити гілку нижче після реального прикладу.
+      const time = t.timestamp ?? (t.frame / fps);
+      const hasRange = t.start_frame != null && t.end_frame != null;
+      return {
+        time,
+        start: hasRange ? t.start_frame / fps : time,
+        end: hasRange ? t.end_frame / fps : time,
+        type: t.type,
+      };
+    });
 
-    // 3. Зібрати треки з усіх батчів, злити детекції одного track_id
+    // 3. Треки: group by (scene_id, track_id) — track_id сам по собі НЕ
+    // унікальний (скидається на кожній сцені), тому композитний ключ.
     const trackMap = new Map();
-    batches.forEach(batch => {
-      (batch[F.batchTracks] || []).forEach(t => {
-        const id = t[F.trackId];
-        if (!trackMap.has(id)) trackMap.set(id, { id, cls: t[F.trackClass], detections: [] });
-        const entry = trackMap.get(id);
-        (t[F.detections] || []).forEach(d => entry.detections.push({
-          frame: d[F.frame], bbox: d[F.bbox], confidence: d[F.confidence]
-        }));
+    trackChunks.forEach(chunk => {
+      (chunk.tracks || []).forEach(d => {
+        // Якщо колись з'являться valid_start_frame/valid_end_frame і в
+        // tracking-чанках (зараз їх немає в прикладі) — тут теж варто
+        // фільтрувати по valid-діапазону, як з transitions вище.
+        const key = `${d.scene_id}:${d.track_id}`;
+        if (!trackMap.has(key)) {
+          trackMap.set(key, { id: key, cls: d.class_name, sceneIndex: d.scene_id, detections: [] });
+        }
+        trackMap.get(key).detections.push(d);
       });
     });
 
     const tracks = Array.from(trackMap.values()).map(t => {
       t.detections.sort((a,b) => a.frame - b.frame);
-      const keyframes = t.detections.map(d => {
-        const [a,b,c,dd] = d.bbox;
-        const px = CONFIG.bboxFormat === 'xyxy'
-          ? { x: a, y: b, w: c - a, h: dd - b }
-          : { x: a, y: b, w: c, h: dd };
-        return {
-          t: d.frame / fps,
-          x: px.x / width, y: px.y / height, w: px.w / width, h: px.h / height,
-          confidence: d.confidence
-        };
-      });
-      const firstT = keyframes[0]?.t ?? 0;
+      const keyframes = t.detections.map(d => ({
+        t: d.frame / fps,
+        x: d.bbox.x / width,
+        y: d.bbox.y / height,
+        w: d.bbox.width / width,
+        h: d.bbox.height / height,
+        confidence: d.confidence,
+      }));
       return {
-        id: t.id, cls: t.cls,
-        sceneIndex: sceneIndexAtTime(firstT),
+        id: t.id,
+        cls: t.cls,
+        sceneIndex: t.sceneIndex, // рядковий scene_id — збігається з scenes[].index вище
         confidence: keyframes[0]?.confidence ?? 0.8,
-        keyframes
+        keyframes,
       };
     });
 
-    // Демо-заглушка 
-    return { duration, fps: DEFAULT_FPS, scenes, cuts, tracks };
+    const inferredDuration = Math.max(
+      0,
+      ...cutChunks.map(c => c.valid_end_frame || 0),
+      ...tracks.flatMap(t => t.keyframes.map(k => k.t * fps)),
+    ) / fps;
+    const duration = meta.duration_sec || video.duration || inferredDuration || 12;
+
+    return { duration, fps, scenes, cuts, tracks };
   }
 
   // ---------- Upload handling ----------
@@ -230,13 +237,6 @@
       processingView.hidden = false;
       statusSub.textContent = 'обробка…';
 
-      // ВАЖЛИВО: video.duration часто = Infinity одразу після loadedmetadata
-      // для webm/деяких mp4-контейнерів (відомий баг/особливість Chrome) —
-      // `video.duration || 12` це НЕ ловить, бо Infinity є truthy. Якщо таке
-      // значення дійде до drawTimeline() (`for (let s=0; s<=dur; s++)`) —
-      // це нескінченний цикл, який вішає вкладку. Тому дістаємо реальну
-      // тривалість явно, з фолбеком на 12с лише якщо і після цього нічого
-      // не вдалось отримати.
       const duration = await resolveVideoDuration(video);
 
       if (!DEMO_MODE) {
@@ -254,8 +254,7 @@
         resolve(videoEl.duration);
         return;
       }
-      // Стандартний обхід Chrome-бага: перемотка у величезний timestamp
-      // змушує браузер порахувати реальну тривалість.
+      
       const onTimeUpdate = () => {
         videoEl.removeEventListener('timeupdate', onTimeUpdate);
         videoEl.currentTime = 0;
@@ -264,8 +263,7 @@
       videoEl.addEventListener('timeupdate', onTimeUpdate);
       videoEl.currentTime = 1e101;
 
-      // Захист про всяк випадок: якщо навіть цей трюк не спрацює (деякі
-      // браузери/кодеки), не залишаємось висіти — фолбек через 2с.
+    
       setTimeout(() => {
         videoEl.removeEventListener('timeupdate', onTimeUpdate);
         resolve(Number.isFinite(videoEl.duration) && videoEl.duration > 0 ? videoEl.duration : fallback);
@@ -357,16 +355,16 @@
       'NVDEC: hardware decode → PyTorch tensor',
       'ray.put(batch) → ObjectRef(0x7f2c…)'
     ]},
-    { key:'cuts', label:'Cut Detection', sub:'TransNetV2', logs:[
+    { key:'cuts', label:'Cut Detection', sub:'AutoShot', logs:[
       'XREAD video_chunks → task received',
-      '<span class="tag">TransNetV2</span>: temporal window [0..100], BF16 autocast',
+      '<span class="tag">AutoShot</span>: temporal window [0..100], BF16 autocast',
       'scipy.signal.find_peaks → 1D NMS',
       '<span class="warn">scene_events</span>: hard_cut @ frame 142',
       'scene_events: gradual_transition @ [388..410]'
     ]},
-    { key:'tracking', label:'Tracking', sub:'Co-DETR + ByteTrack', logs:[
+    { key:'tracking', label:'Tracking', sub:'YOLO + ByteTrack', logs:[
       'XREAD scene_events + video_chunks',
-      '<span class="tag">Co-DETR</span>: BF16 inference on H200 Tensor Cores',
+      '<span class="tag">YOLO</span>: BF16 inference on H200 Tensor Cores',
       'ByteTrack: Kalman filter update, Hungarian match',
       'reset Track IDs @ scene boundary',
       'tracking_results: XADD batch complete'
@@ -432,9 +430,6 @@
 
   // ---------- Заглушка замість пайплайна (детермінована, без Math.random) ----------
 
-  // Коли буде реальний бекенд aункція просто не викликається,
-  // замість неї piepline = normalizeBackendResponse(await fetch(...)).
-
   const STUB_TEMPLATE = {
     // межі сцен як частки тривалості (0..1)
     sceneBoundaries: [0, 0.18, 0.34, 0.52, 0.71, 0.85, 1],
@@ -492,7 +487,7 @@
       });
     });
 
-    return { duration, fps, scenes, cuts, tracks };
+    return { duration, fps: DEFAULT_FPS, scenes, cuts, tracks };
   }
 
   function detectionsAtTime(t){
@@ -517,9 +512,6 @@
     });
   }
 
-  // Кураторські кольори для найчастіших класів; решта з 80 —
-  // детермінований хеш → HSL, щоб той самий клас завжди мав той самий колір,
-  // але не довелось вручну прописувати 80 значень.
   const CURATED_CLASS_COLORS = {
     person: '#39e6b0',
     car: '#5b9dff',
@@ -527,8 +519,7 @@
     bus: '#5b9dff',
     motorcycle: '#5b9dff',
     bicycle: '#5b9dff',
-    // Донавчені класи — навмисно "тривожна" червоно-оранжева гама,
-    // щоб вирізнялись на overlay серед побутових об'єктів COCO.
+
     drone: '#ff4f64',
     fpv_drone: '#ff4f64',
     tank: '#ff8a3d',
@@ -559,8 +550,6 @@
     const classCounts = {};
     pipeline.tracks.forEach(t => classCounts[t.cls] = (classCounts[t.cls]||0)+1);
 
-    // шукати перед обробкою (selectedClasses); тут просто ховаємо/показуємо
-    // вже отримані детекції в overlay.
     visibleClasses = new Set(Object.keys(classCounts));
 
     document.getElementById('class-legend').innerHTML = Object.entries(classCounts).map(([cls,count]) => `
@@ -600,14 +589,6 @@
     video.play().catch(()=>{});
   }
 
-  // ВИПРАВЛЕНО: раніше ці 5 listener-ів навішувались всередині
-  // setupResultView() — а вона викликається на КОЖНЕ оброблене відео.
-  // video/window — persistent-об'єкти (не пересоздаються між відео,
-  // міняється лише video.src), тому з кожним новим відео/reset додавався
-  // ще один повний набір listener-ів поверх старих. Через кілька відео
-  // за сесію timeupdate/resize/seeked виконувались N разів на кожну подію
-  // (N = скільки відео вже обробили) — звідси прогресуюче гальмування
-  // і "video freezing" при повторному використанні.
   let _playbackListenersAttached = false;
   function initPlaybackListenersOnce(){
     if (_playbackListenersAttached) return;
