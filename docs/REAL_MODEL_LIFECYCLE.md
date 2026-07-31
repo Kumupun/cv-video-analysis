@@ -23,7 +23,8 @@
    pads only the small representation to its 100-frame window, runs inference,
    and publishes `cv:cut_results`.
 6. Coordinator publishes only contiguous, cut-verified `cv:tracking_jobs`.
-7. Tracking processes frames sequentially, preserving ByteTrack state without
+7. Custom YOLOE detection and ByteTrack process frames sequentially,
+   preserving tracker state without
    copying the whole RGB chunk into another BGR batch.
 8. Aggregation stores the final JSON. Ingest observes durable tracking progress
    and releases each Ray object from the client that created it.
@@ -77,13 +78,14 @@ docker compose -f compose.yaml -f compose.ml.example.yaml --profile ml --profile
 
 ## 6. Verification
 
-Direct AutoShot inference:
+Verify both bundled checkpoints:
 
 ```powershell
-docker run --rm --gpus all --shm-size=2g `
-  -v "${PWD}\models:/models:ro" `
-  cv-video-analysis-ml:local `
-  python -c "import numpy as np, torch; from participant_4_cut_detection.autoshot_detector import AutoShotDetector; d=AutoShotDetector(weights_path='/models/weights_for_cut.pth', architecture_dir='/models/autoshot_arch'); f=np.zeros((3,1080,1920,3),dtype=np.uint8); print(torch.cuda.get_device_name(0)); print(d.detect_cuts(f))"
+Get-FileHash .\models\weights_for_cut.pth -Algorithm SHA256
+Get-FileHash .\models\yoloe26l_military_assets.pt -Algorithm SHA256
+
+docker compose -f compose.yaml -f compose.ml.example.yaml --profile ml run --rm `
+  tracking-worker python -c "from ultralytics import YOLO; m=YOLO('/models/yoloe26l_military_assets.pt'); print(m.names)"
 ```
 
 End-to-end video or archive:
@@ -94,5 +96,6 @@ End-to-end video or archive:
 ```
 
 A successful cut-only run must reach `completed` and contain
-`AutoShot chunk completed` in cut-worker logs. Empty transitions are valid when
+`AutoShot chunk completed` and `YOLOE + ByteTrack tracking chunk completed`
+in worker logs. Empty transitions are valid when
 the video contains no confident hard cut.

@@ -42,13 +42,17 @@ def get_tracking_actor(ray: Any, settings: Settings, task_id: Any) -> Any:
             model_id: str,
             classes: tuple[str, ...],
             confidence: float,
+            image_size: int,
+            allow_download: bool,
         ) -> None:
-            from participant_3_tracking.yolo_world_tracker import YoloWorldTracker
+            from participant_3_tracking.yolo_world_tracker import UltralyticsTracker
 
-            self.tracker = YoloWorldTracker(
+            self.tracker = UltralyticsTracker(
                 model_id=model_id,
                 classes=classes,
                 confidence=confidence,
+                image_size=image_size,
+                allow_download=allow_download,
             )
             self.restored = False
             self.cache: dict[int, dict[str, Any]] = {}
@@ -66,6 +70,8 @@ def get_tracking_actor(ray: Any, settings: Settings, task_id: Any) -> Any:
             job = TrackingJobMessage.model_validate(job_payload)
             cached = self.cache.get(job.chunk_index)
             if cached is not None:
+                if "checkpoint" not in cached:
+                    cached["checkpoint"] = self.tracker.export_state()
                 return cached
             if len(wrapped_ref) != 1:
                 raise ValueError("Expected one nested Ray ObjectRef")
@@ -80,9 +86,13 @@ def get_tracking_actor(ray: Any, settings: Settings, task_id: Any) -> Any:
             response = {
                 "tracks": tracks,
                 "processing_ms": (time.perf_counter() - started) * 1_000,
-                "checkpoint": self.tracker.export_state(),
             }
+            # Cache the completed inference before serializing ByteTrack state.
+            # If checkpoint export fails, StreamWorker retries the same message.
+            # Keeping this partial response prevents the stateful tracker from
+            # processing the same chunk twice and reporting a false order error.
             self.cache[job.chunk_index] = response
+            response["checkpoint"] = self.tracker.export_state()
             if len(self.cache) > 4:
                 del self.cache[min(self.cache)]
             return response
@@ -96,6 +106,8 @@ def get_tracking_actor(ray: Any, settings: Settings, task_id: Any) -> Any:
         settings.tracking_model_id,
         settings.tracking_model_classes,
         settings.tracking_model_confidence,
+        settings.tracking_model_image_size,
+        settings.tracking_model_allow_download,
     )
 
 
@@ -236,7 +248,7 @@ class RealTrackingHandler:
             await self.streams.client.delete(self._state_key(job.task_id))
 
         logger.info(
-            "YOLO-World tracking chunk completed",
+            "YOLOE + ByteTrack tracking chunk completed",
             extra={
                 "task_id": str(job.task_id),
                 "chunk_index": job.chunk_index,
@@ -247,7 +259,7 @@ class RealTrackingHandler:
 
 def factory(settings: Settings, streams: RedisStreams) -> StreamWorker:
     return StreamWorker(
-        worker_name="yolo-world-tracking",
+        worker_name="yoloe-bytetrack-tracking",
         stream=settings.stream_tracking_jobs,
         group=settings.group_tracking,
         handler=RealTrackingHandler(settings, streams),

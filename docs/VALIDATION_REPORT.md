@@ -2,9 +2,10 @@
 
 ## Completed in this environment
 
-- `python -m pytest -c backend/pyproject.toml backend/tests` — **76 passed**.
+- `python -m pytest -c backend/pyproject.toml backend/tests` — **83 passed**.
 - `python -m compileall -q backend/app backend/tests participant_3_tracking participant_4_cut_detection` — passed.
 - Python source line-length scan — no lines above 88 characters.
+- Both supplied model artifacts pass their recorded SHA-256 values.
 - The supplied `models/weights_for_cut.pth` passes its SHA-256 manifest,
   contains `checkpoint["net"]` with 90 state entries, and loads strictly into
   the bundled AutoShot architecture with no missing, unexpected, or mismatched
@@ -68,7 +69,7 @@ python -m pytest -c backend/pyproject.toml backend/tests
 docker compose config --quiet
 docker compose -f compose.yaml -f compose.ml.example.yaml config --quiet
 docker compose --profile mock up --build
-bash backend/scripts/smoke_test.sh /absolute/path/to/sample.mp4
+.\backend\scripts\smoke_test.ps1 "C:\path\sample.mp4"
 ```
 
 For the H200 environment, also run:
@@ -81,7 +82,7 @@ docker compose logs --tail=200
 ```
 
 Run the real `ml` profile with the supplied cut checkpoint and the agreed
-YOLO-World checkpoint, then measure Precision/Recall/F1 for cuts and
+custom YOLOE checkpoint, then measure Precision/Recall/F1 for cuts and
 mAP/MOTA/IDF1 for detection/tracking on the agreed test dataset.
 
 ## Throughput optimization validation

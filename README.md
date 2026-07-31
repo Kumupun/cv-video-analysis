@@ -11,7 +11,7 @@
 3. Кадри не пишуться у `.jpg` і не передаються через Redis/HTTP. У Redis передається лише непрозорий токен та метадані; справжній Ray `ObjectRef` утримує named registry actor.
 4. Кожен chunk має `context range` із перекриттям і окремий `valid range`, тому склейка на межі двох батчів не губиться та не дублюється.
 5. `ObjectRef` звільняється лише після наявності результатів cut detection і tracking для конкретного chunk; повторна доставка Redis-повідомлення не спричиняє повторне очищення.
-6. `backend/app/workers/mock_cut.py` та `mock_tracking.py` — лише development-симулятори контрактів. Реальний ML-профіль використовує AutoShot та YOLO-World + ByteTrack.
+6. `backend/app/workers/mock_cut.py` та `mock_tracking.py` — лише development-симулятори контрактів. Реальний ML-профіль використовує AutoShot та custom YOLOE-26L + ByteTrack.
 
 ## Структура
 
@@ -34,7 +34,7 @@ backend/
 ├── scripts/                 # smoke test
 ├── tests/                   # backend unit tests
 └── pyproject.toml           # pytest, Ruff and Black settings
-participant_3_tracking/      # YOLO-World + ByteTrack actor and Redis adapter
+participant_3_tracking/      # custom YOLOE + ByteTrack actor and Redis adapter
 participant_4_cut_detection/ # AutoShot actor and Redis adapter
 models/                      # supplied AutoShot checkpoint + optional tracking artifact
 monitoring/                  # Prometheus alerts + Grafana provisioning/dashboard
@@ -145,9 +145,10 @@ Mock cut worker створює одну сцену на chunk, а mock tracking 
 рядка: воркери отримують його через named registry та передають вкладеним
 посиланням у Ray Actor.
 
-AutoShot checkpoint уже доданий у `models/weights_for_cut.pth`. Для повністю
-offline tracking додайте `models/yolov8s-world.pt` згідно з `models/README.md`,
-після чого запустіть **без** профілю `mock`:
+Обидва checkpoint-и вже додані: AutoShot у `models/weights_for_cut.pth` і
+custom YOLOE-26L у `models/yoloe26l_military_assets.pt`. Перевірте їх через
+`sha256sum -c models/SHA256SUMS`, після чого запускайте **без** профілю
+`mock`:
 
 ```bash
 cp .env.example .env
@@ -155,7 +156,7 @@ docker compose -f compose.yaml -f compose.ml.example.yaml \
   --profile ml up --build
 ```
 
-`ml-ray-worker` є справжнім GPU Ray node. AutoShot і YOLO-World actors
+`ml-ray-worker` є справжнім GPU Ray node. AutoShot і YOLOE actors
 плануються тільки на ньому через custom resources. Cut-worker читає
 `cv:video_chunks`, а tracking-worker — лише `cv:tracking_jobs`; тому coordinator
 не обходиться. Tracking actor розділений за `task_id`, кешує повторну обробку та
@@ -193,8 +194,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\backend\scripts\smoke_test.ps1 "C:\path\videos.zip"
 ```
 
-Cut-only перевірка з реальною AutoShot і mock tracking, коли
-`models/yolov8s-world.pt` ще відсутній:
+Cut-only перевірка з реальною AutoShot і mock tracking:
 
 ```powershell
 docker compose -f compose.yaml -f compose.ml.example.yaml --profile ml --profile mock up --build -d redis ray-head storage-init backend ingest-worker coordinator aggregator ml-ray-worker cut-worker mock-tracking-worker
@@ -266,7 +266,7 @@ docker compose -f compose.yaml -f compose.ml.example.yaml config --quiet
 
 - Compose з окремими процесами через Ray Client перевіряє контракти та порядок, але сам по собі не гарантує фізичний zero-copy між довільними контейнерами/вузлами. Для H200 decode і ML Ray Actors треба розмістити на одному Ray node; деталі є в `docs/ARCHITECTURE_AND_DECISIONS.md`.
 - Змініть пароль Grafana у `.env`.
-- Не вмикайте `mock` profile у production. Перед ML-запуском перевірте bundled AutoShot checkpoint через `sha256sum -c models/SHA256SUMS` і додайте/налаштуйте tracking checkpoint згідно з `models/README.md`.
+- Не вмикайте `mock` profile у production. Перед ML-запуском перевірте обидва bundled checkpoint-и через `sha256sum -c models/SHA256SUMS`; tracking використовує local YOLOE-26L checkpoint без runtime download.
 - `ALLOW_REMOTE_URLS=false` за замовчуванням. При увімкненні URL перевіряються проти private/loopback/reserved IP для зменшення SSRF-ризику.
 - `RAY_SHM_SIZE` та `RAY_OBJECT_STORE_BYTES` треба підібрати під RAM сервера. Не задавайте їх “наосліп” як 30–50% без перевірки паралельності, розміру кадрів і запасу для ОС/воркерів.
 - Redis і Ray не публікуються назовні; зовні доступний лише FastAPI, а monitoring-порти можна закрити reverse proxy/VPN.

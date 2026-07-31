@@ -105,9 +105,11 @@ class Settings(BaseSettings):
     cut_model_actor_resource: str = "cut-model"
     cut_model_num_gpus: float = Field(default=0.5, ge=0.0, le=8.0)
 
-    tracking_model_id: str = "/models/yolov8s-world.pt"
-    tracking_model_classes: tuple[str, ...] = ("person", "vehicle")
+    tracking_model_id: str = "/models/yoloe26l_military_assets.pt"
+    tracking_model_classes: tuple[str, ...] = ()
     tracking_model_confidence: float = Field(default=0.25, ge=0.0, le=1.0)
+    tracking_model_image_size: int = Field(default=960, ge=320, le=4096)
+    tracking_model_allow_download: bool = False
     tracking_actor_namespace: str = "cv-video-analysis-tracking"
     tracking_actor_resource: str = "tracking-model"
     tracking_model_num_gpus: float = Field(default=0.5, ge=0.0, le=8.0)

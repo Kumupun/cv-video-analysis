@@ -315,8 +315,9 @@ task in Redis, and each cached chunk result is written before stream
 publication, which makes redelivery idempotent. Only transitions whose global
 anchor belongs to the chunk valid range are emitted.
 
-YOLO-World uses a named actor per task, which is the state partition required by
-ByteTrack. The actor processes only scene intervals inside the valid range,
+The supplied custom YOLOE-26L detector uses a named actor per task, which is
+the state partition required by ByteTrack. The actor processes only scene
+intervals inside the valid range,
 resets on a changed `scene_id`, maps raw tracker IDs to scene-local IDs, and
 checkpoints predictor state plus ID mappings after every chunk. The worker
 publishes through the existing atomic Redis sequence and destroys the actor
@@ -326,7 +327,8 @@ The supplied AutoShot checkpoint is versioned at `models/weights_for_cut.pth`
 with a SHA-256 manifest. Its compatible architecture is bundled in the cut
 worker package, so production startup does not download executable Python
 source. Loading is strict and fails instead of silently using random or
-partially matched weights. The tracking checkpoint remains deployment-specific;
-required paths are documented in `models/README.md`.
+partially matched weights. The supplied tracking checkpoint is versioned at
+`models/yoloe26l_military_assets.pt`, loaded with the matching Ultralytics
+8.4.112 runtime, and uses its embedded 12-class vocabulary without reprompting.
 The `mock` and `ml` profiles must not be enabled together because they
 intentionally share consumer groups.
