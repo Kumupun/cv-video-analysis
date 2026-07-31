@@ -1,1 +1,1 @@
-"""YOLO-World + ByteTrack integration package."""
+"""Custom YOLOE detector + ByteTrack integration package."""

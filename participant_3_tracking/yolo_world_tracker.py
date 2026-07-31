@@ -3,13 +3,14 @@ from __future__ import annotations
 import base64
 import logging
 from collections.abc import Iterable
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
-class YoloWorldTracker:
-    """Stateful YOLO-World + ByteTrack adapter for one video task."""
+class UltralyticsTracker:
+    """Stateful custom Ultralytics detector + ByteTrack adapter."""
 
     def __init__(
         self,
@@ -17,24 +18,80 @@ class YoloWorldTracker:
         model_id: str,
         classes: Iterable[str],
         confidence: float,
+        image_size: int,
+        allow_download: bool,
     ) -> None:
         import torch
-        from ultralytics import YOLOWorld
+        from ultralytics import YOLO
 
-        self.model = YOLOWorld(model_id)
-        self.classes = tuple(classes)
-        if not self.classes:
-            raise ValueError("At least one YOLO-World class is required")
-        self.model.set_classes(list(self.classes))
+        resolved_model_id = self._resolve_model_id(model_id, allow_download)
+        self.model = YOLO(resolved_model_id)
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model.to(self.device)
+
+        self.model_names = self._normalize_names(self.model.names)
+        self.classes = tuple(
+            class_name.strip() for class_name in classes if class_name.strip()
+        )
+        self.class_ids = self._resolve_class_ids(self.classes)
         self.confidence = float(confidence)
+        self.image_size = int(image_size)
 
         self.active_scene_id: str | None = None
         self.raw_to_scene_track_id: dict[int, int] = {}
         self.next_scene_track_id = 0
         self.expected_chunk_index: int | None = None
         self._pending_trackers: Any | None = None
+
+    @staticmethod
+    def _resolve_model_id(model_id: str, allow_download: bool) -> str:
+        candidate = Path(model_id).expanduser()
+        if candidate.is_file():
+            return str(candidate)
+        if allow_download:
+            return model_id
+        raise FileNotFoundError(
+            "Tracking checkpoint is missing and runtime downloads are disabled: "
+            f"{candidate}. Put the supplied checkpoint in models/ and set "
+            "TRACKING_MODEL_ID to its /models path."
+        )
+
+    @staticmethod
+    def _normalize_names(names: Any) -> dict[int, str]:
+        if isinstance(names, dict):
+            return {int(class_id): str(name) for class_id, name in names.items()}
+        if isinstance(names, (list, tuple)):
+            return {class_id: str(name) for class_id, name in enumerate(names)}
+        raise TypeError("Ultralytics model did not expose a valid class-name mapping")
+
+    def _resolve_class_ids(self, requested: tuple[str, ...]) -> tuple[int, ...] | None:
+        if not requested:
+            return None
+
+        normalized_to_id = {
+            name.casefold(): class_id for class_id, name in self.model_names.items()
+        }
+        unknown = [
+            name for name in requested if name.casefold() not in normalized_to_id
+        ]
+        if unknown:
+            available = ", ".join(self.model_names.values())
+            raise ValueError(
+                "Unknown tracking classes: "
+                f"{', '.join(unknown)}. Available checkpoint classes: {available}"
+            )
+        return tuple(normalized_to_id[name.casefold()] for name in requested)
+
+    def _inference_options(self) -> dict[str, Any]:
+        options: dict[str, Any] = {
+            "verbose": False,
+            "conf": self.confidence,
+            "device": self.device,
+            "imgsz": self.image_size,
+        }
+        if self.class_ids is not None:
+            options["classes"] = list(self.class_ids)
+        return options
 
     def _reset_for_scene(self, scene_id: str) -> None:
         self.active_scene_id = scene_id
@@ -50,13 +107,13 @@ class YoloWorldTracker:
 
         array = np.asarray(frame)
         if array.ndim != 3 or array.shape[-1] != 3:
-            raise ValueError("YOLO-World expects one RGB frame with shape [H,W,C]")
+            raise ValueError("Ultralytics expects one RGB frame with shape [H,W,C]")
         return np.ascontiguousarray(array[..., ::-1])
 
     def _install_pending_trackers(self, first_frame: Any) -> None:
         if self._pending_trackers is None:
             return
-        self.model.predict(source=[first_frame], verbose=False, device=self.device)
+        self.model.predict(source=[first_frame], **self._inference_options())
         predictor = getattr(self.model, "predictor", None)
         if predictor is None:
             raise RuntimeError("Ultralytics predictor was not initialized")
@@ -85,7 +142,7 @@ class YoloWorldTracker:
 
         frame_array = np.asarray(frames)
         if frame_array.ndim != 4 or frame_array.shape[-1] != 3:
-            raise ValueError("YOLO-World expects RGB frames with shape [T,H,W,C]")
+            raise ValueError("Ultralytics expects RGB frames with shape [T,H,W,C]")
         if len(frame_array) == 0:
             return []
 
@@ -98,9 +155,7 @@ class YoloWorldTracker:
                 source=[bgr_frame],
                 persist=True,
                 tracker="bytetrack.yaml",
-                verbose=False,
-                conf=self.confidence,
-                device=self.device,
+                **self._inference_options(),
             )
             if not results:
                 continue
@@ -113,6 +168,9 @@ class YoloWorldTracker:
             confidences = boxes.conf.detach().cpu().numpy()
             class_ids = boxes.cls.int().detach().cpu().numpy()
             frame_height, frame_width = bgr_frame.shape[:2]
+            result_names = self._normalize_names(
+                getattr(result, "names", self.model_names)
+            )
 
             for box, raw_id, confidence, class_id in zip(
                 xyxy,
@@ -131,17 +189,12 @@ class YoloWorldTracker:
                 if width <= 0.0 or height <= 0.0:
                     continue
 
-                names = self.model.names
-                if isinstance(names, dict):
-                    class_name = str(names[int(class_id)])
-                else:
-                    class_name = str(names[int(class_id)])
                 tracks.append(
                     {
                         "frame": global_start_frame + offset,
                         "scene_id": scene_id,
                         "track_id": self._map_track_id(int(raw_id)),
-                        "class_name": class_name,
+                        "class_name": result_names[int(class_id)],
                         "confidence": min(1.0, max(0.0, float(confidence))),
                         "bbox": {
                             "x": x1,
@@ -230,3 +283,7 @@ class YoloWorldTracker:
         expected = state.get("expected_chunk_index")
         self.expected_chunk_index = int(expected) if expected is not None else None
         self._pending_trackers = state.get("trackers")
+
+
+# Backward-compatible import for code that used the old adapter name.
+YoloWorldTracker = UltralyticsTracker
