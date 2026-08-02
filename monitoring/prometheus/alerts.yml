@@ -1,0 +1,60 @@
+groups:
+  - name: cv-pipeline
+    rules:
+      - alert: BackendUnavailable
+        expr: up{job="backend"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "CV backend is unavailable"
+
+      - alert: RedisUnavailable
+        expr: up{job="redis"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Redis is unavailable"
+
+      - alert: HostMemoryPressure
+        expr: (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) > 0.90
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Host memory usage is above 90%"
+
+      - alert: GPUHighTemperature
+        expr: DCGM_FI_DEV_GPU_TEMP > 85
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "GPU temperature is above 85°C"
+
+      - alert: GPUMemoryPressure
+        expr: DCGM_FI_DEV_FB_USED / (DCGM_FI_DEV_FB_USED + DCGM_FI_DEV_FB_FREE) > 0.92
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "GPU framebuffer memory usage is above 92%"
+      - alert: SharedMemoryPressure
+        expr: |
+          (1 - node_filesystem_avail_bytes{mountpoint="/dev/shm"}
+          / node_filesystem_size_bytes{mountpoint="/dev/shm"}) > 0.85
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Shared memory /dev/shm usage is above 85%"
+
+      - alert: PipelineWorkerErrors
+        expr: sum(increase(cv_worker_errors_total[5m])) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A pipeline worker is repeatedly failing messages"
+

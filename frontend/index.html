@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CV Pipeline — Video Analysis </title>
+<link rel="stylesheet" href="styles.css?v=20260802-1">
+</head>
+<body>
+
+<div class="app">
+  <header class="top">
+    <div class="brand">
+      <span class="dot"></span>
+      <h1>Video-analysis</h1>
+    </div>
+    <span class="sub" id="status-sub">очікування завантаження</span>
+    <button class="reset-btn" id="reset-btn" style="display:none;">↺ Нове відео</button>
+  </header>
+
+  <main>
+
+    <section id="upload-view">
+      <div class="upload-stack">
+        <div class="dropzone" id="dropzone">
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4">
+            <path d="M12 3v12m0-12l-4 4m4-4l4 4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2"/>
+          </svg>
+          <h2>Перетягніть відео або ZIP-архів сюди</h2>
+          <p>або натисніть, щоб обрати файл</p>
+          <div class="fmt">MP4 · MOV · WEBM · MKV · ZIP — обробка почнеться автоматично</div>
+        </div>
+
+        <div class="class-select">
+          <div class="class-select-head">
+            <span class="eyebrow">Класи для детекції (YOLO-World · 92 prompts)</span>
+            <div class="class-select-actions">
+              <button type="button" class="mini-btn" id="classes-select-all">усі</button>
+              <button type="button" class="mini-btn" id="classes-select-none">жодного</button>
+            </div>
+          </div>
+          <input type="text" class="class-search" id="class-search" placeholder="Пошук класу… напр. soldier, person, car">
+          <div class="class-select-options" id="class-select-options"></div>
+        </div>
+      </div>
+      <input type="file" id="file-input" accept="video/*,.mkv,.zip,application/zip">
+    </section>
+
+
+    <section id="processing-view" hidden>
+      <span class="eyebrow">Pipeline status</span>
+      <div class="stage-track" id="stage-track"></div>
+      <div class="status-detail" id="status-detail">Очікуємо відповідь backend…</div>
+      <div class="console" id="console"></div>
+    </section>
+
+
+    <section id="result-view" hidden>
+      <div class="stage-main">
+        <div class="result-toolbar">
+          <span class="eyebrow">Playback + detections</span>
+          <button type="button" class="mini-btn" id="archive-back-btn" hidden>
+            ← До результатів архіву
+          </button>
+        </div>
+        <div class="video-wrap" id="video-wrap">
+          <video id="video" playsinline></video>
+          <canvas id="overlay"></canvas>
+          <div class="video-restore-note" id="video-restore-note" hidden>
+            <div>
+              <p id="video-restore-text">Результат відновлено з бекенда. Браузер
+                не зберігає доступ до локального відеофайлу після F5.</p>
+              <button type="button" class="mini-btn" id="reattach-video-btn">
+                Підключити відео для playback
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="timeline-wrap">
+          <div class="timeline-head">
+            <span class="eyebrow">Scene timeline</span>
+            <div class="legend-inline">
+              <span><span class="swatch" style="background:var(--cut-hard);"></span>hard_cut</span>
+              <span><span class="swatch" style="background:var(--cut-gradual);"></span>gradual_transition</span>
+            </div>
+          </div>
+          <canvas id="timeline-canvas"></canvas>
+        </div>
+      </div>
+
+      <aside class="side-panel">
+        <div class="block">
+          <span class="eyebrow">Classes detected</span>
+          <div id="class-legend"></div>
+        </div>
+        <div class="block">
+          <span class="eyebrow">Transitions (<span id="scene-count">0</span>)</span>
+          <div class="scene-list" id="scene-list"></div>
+        </div>
+        <div class="block">
+          <span class="eyebrow">Summary</span>
+          <div class="stat-row"><span>Тривалість</span><b id="stat-duration">—</b></div>
+          <div class="stat-row"><span>FPS</span><b id="stat-fps">—</b></div>
+          <div class="stat-row"><span>Треків всього</span><b id="stat-tracks">—</b></div>
+        </div>
+      </aside>
+    </section>
+
+
+    <section id="archive-result-view" hidden>
+      <span class="eyebrow">Archive results</span>
+      <div class="archive-summary" id="archive-summary"></div>
+      <div class="archive-results" id="archive-results"></div>
+    </section>
+  </main>
+</div>
+
+<script src="app.js?v=20260802-1"></script>
+</body>
+</html>

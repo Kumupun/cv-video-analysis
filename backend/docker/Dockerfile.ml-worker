@@ -1,0 +1,46 @@
+ARG PYTORCH_IMAGE=pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
+FROM ${PYTORCH_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/worker
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       ffmpeg libglib2.0-0 libgl1 curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /worker
+
+COPY backend/requirements /worker/backend-requirements
+RUN python -m pip install --upgrade pip \
+    && python -m pip install -r /worker/backend-requirements/runtime.txt
+
+COPY participant_3_tracking/requirements.txt /tmp/tracking-requirements.txt
+COPY participant_4_cut_detection/requirements.txt /tmp/cut-requirements.txt
+RUN python -m pip install \
+      -r /tmp/tracking-requirements.txt \
+      -r /tmp/cut-requirements.txt \
+    && python -c "import clip; assert hasattr(clip, 'load') and hasattr(clip, 'tokenize')"
+
+RUN useradd --create-home --uid 10001 worker \
+    && mkdir -p /models /data/uploads /data/results \
+    && chown -R worker:worker /worker /models /data /home/worker
+
+USER worker
+RUN python -c "import clip; clip.load('ViT-B/32', device='cpu', jit=False)"
+
+USER root
+
+COPY --chown=worker:worker backend/app /worker/app
+COPY --chown=worker:worker backend/pyproject.toml /worker/backend/pyproject.toml
+COPY --chown=worker:worker participant_3_tracking /worker/participant_3_tracking
+COPY --chown=worker:worker participant_4_cut_detection /worker/participant_4_cut_detection
+
+USER worker
+EXPOSE 9101
+
+CMD ["python", "-c", "raise SystemExit('Set an ML service command')"]

@@ -1,0 +1,122 @@
+
+x-ml-image: &ml-image
+  image: cv-video-analysis-ml:local
+
+x-ml-build: &ml-build
+  <<: *ml-image
+  build:
+    context: .
+    dockerfile: backend/docker/Dockerfile.ml-worker
+
+x-ml-driver: &ml-driver
+  <<: *ml-image
+  profiles: ["ml"]
+  restart: unless-stopped
+  environment:
+    APP_ENV: ${APP_ENV:-development}
+    LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    REDIS_URL: redis://redis:6379/0
+    REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS: ${REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS:-10}
+    REDIS_SOCKET_TIMEOUT_SECONDS: ${REDIS_SOCKET_TIMEOUT_SECONDS:-30}
+    REDIS_HEALTH_CHECK_INTERVAL_SECONDS: ${REDIS_HEALTH_CHECK_INTERVAL_SECONDS:-15}
+    REDIS_RETRY_ATTEMPTS: ${REDIS_RETRY_ATTEMPTS:-5}
+    RAY_ADDRESS: ray://ray-head:10001
+    RAY_ACTOR_CALL_TIMEOUT_SECONDS: ${RAY_ACTOR_CALL_TIMEOUT_SECONDS:-30}
+    ML_INFERENCE_TIMEOUT_SECONDS: ${ML_INFERENCE_TIMEOUT_SECONDS:-600}
+    WORKER_METRICS_PORT: 9101
+    CUT_WORKER_CONCURRENCY: ${ML_CUT_WORKER_CONCURRENCY:-1}
+    TRACKING_WORKER_CONCURRENCY: ${ML_TRACKING_WORKER_CONCURRENCY:-1}
+    CUT_MODEL_WEIGHTS_PATH: ${CUT_MODEL_WEIGHTS_PATH:-/models/weights_for_cut.pth}
+    CUT_MODEL_ARCH_DIR: ${CUT_MODEL_ARCH_DIR:-/models/autoshot_arch}
+    CUT_MODEL_ALLOW_DOWNLOAD: ${CUT_MODEL_ALLOW_DOWNLOAD:-false}
+    CUT_MODEL_THRESHOLD: ${CUT_MODEL_THRESHOLD:-0.55}
+    CUT_MODEL_GRADUAL_THRESHOLD: ${CUT_MODEL_GRADUAL_THRESHOLD:-0.75}
+    CUT_MODEL_GRADUAL_BOUNDARY_THRESHOLD: ${CUT_MODEL_GRADUAL_BOUNDARY_THRESHOLD:-0.65}
+    CUT_MODEL_GRADUAL_MIN_FRAMES: ${CUT_MODEL_GRADUAL_MIN_FRAMES:-6}
+    CUT_MODEL_GRADUAL_MERGE_GAP_FRAMES: ${CUT_MODEL_GRADUAL_MERGE_GAP_FRAMES:-0}
+    CUT_MODEL_ACTOR_RESOURCE: cut-model
+    CUT_MODEL_NUM_GPUS: ${CUT_MODEL_NUM_GPUS:-0.5}
+    TRACKING_MODEL_ID: ${TRACKING_MODEL_ID:-/models/best.pt}
+    TRACKING_ENSEMBLE_MODEL_ID: ${TRACKING_ENSEMBLE_MODEL_ID:-/models/yoloe26l_military_assets.pt}
+    TRACKING_ENSEMBLE_IOU_THRESHOLD: ${TRACKING_ENSEMBLE_IOU_THRESHOLD:-0.55}
+    TRACKING_PARALLEL_INFERENCE: ${TRACKING_PARALLEL_INFERENCE:-true}
+    TRACKING_MODEL_CLASSES: '${TRACKING_MODEL_CLASSES:-[]}'
+    TRACKING_MODEL_CONFIDENCE: ${TRACKING_MODEL_CONFIDENCE:-0.50}
+    TRACKING_TRACK_LOW_THRESHOLD: ${TRACKING_TRACK_LOW_THRESHOLD:-0.10}
+    TRACKING_NEW_TRACK_THRESHOLD: ${TRACKING_NEW_TRACK_THRESHOLD:-0.55}
+    TRACKING_TRACK_BUFFER: ${TRACKING_TRACK_BUFFER:-45}
+    TRACKING_MATCH_THRESHOLD: ${TRACKING_MATCH_THRESHOLD:-0.75}
+    TRACKING_FUSE_SCORE: ${TRACKING_FUSE_SCORE:-true}
+    TRACKING_MODEL_IMAGE_SIZE: ${TRACKING_MODEL_IMAGE_SIZE:-960}
+    TRACKING_MODEL_ALLOW_DOWNLOAD: ${TRACKING_MODEL_ALLOW_DOWNLOAD:-false}
+    TRACKING_ACTOR_RESOURCE: tracking-model
+    TRACKING_MODEL_NUM_GPUS: ${TRACKING_MODEL_NUM_GPUS:-0.5}
+  volumes:
+    - ./models:/models:ro
+    - uploads:/data/uploads
+    - results:/data/results
+  expose:
+    - "9101"
+  depends_on:
+    redis:
+      condition: service_healthy
+    ray-head:
+      condition: service_healthy
+    storage-init:
+      condition: service_completed_successfully
+    ml-ray-worker:
+      condition: service_healthy
+  networks:
+    - pipeline
+
+services:
+  ingest-worker:
+    environment:
+      MAX_INFLIGHT_CHUNKS_PER_TASK: ${ML_MAX_INFLIGHT_CHUNKS_PER_TASK:-2}
+      MAX_INFLIGHT_CHUNKS_GLOBAL: ${ML_MAX_INFLIGHT_CHUNKS_GLOBAL:-2}
+
+  ml-ray-worker:
+    <<: *ml-build
+    profiles: ["ml"]
+    restart: unless-stopped
+    command:
+      - bash
+      - -lc
+      - >-
+        ray start --address=ray-head:6379 --block
+        --disable-usage-stats
+        --num-cpus=${ML_RAY_NODE_CPUS:-4}
+        --num-gpus=${ML_RAY_NODE_GPUS:-1}
+        --object-store-memory=${ML_RAY_OBJECT_STORE_BYTES:-268435456}
+        --resources='{"cut-model": 1, "tracking-model": 1}'
+    environment:
+      RAY_memory_monitor_refresh_ms: ${RAY_MEMORY_MONITOR_REFRESH_MS:-250}
+      RAY_memory_usage_threshold: ${RAY_MEMORY_USAGE_THRESHOLD:-0.95}
+    volumes:
+      - ./models:/models:ro
+    shm_size: ${ML_WORKER_SHM_SIZE:-1gb}
+    healthcheck:
+      test: ["CMD-SHELL", "ray status >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      ray-head:
+        condition: service_healthy
+    networks:
+      - pipeline
+
+  cut-worker:
+    <<: *ml-driver
+    command: ["python", "-m", "participant_4_cut_detection.worker"]
+
+  tracking-worker:
+    <<: *ml-driver
+    command: ["python", "-m", "participant_3_tracking.worker"]

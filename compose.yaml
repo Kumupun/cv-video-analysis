@@ -1,0 +1,271 @@
+name: cv-video-analysis
+
+x-app-env: &app-env
+  APP_ENV: ${APP_ENV:-development}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  REDIS_URL: redis://redis:6379/0
+  REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS: ${REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS:-10}
+  REDIS_SOCKET_TIMEOUT_SECONDS: ${REDIS_SOCKET_TIMEOUT_SECONDS:-30}
+  REDIS_HEALTH_CHECK_INTERVAL_SECONDS: ${REDIS_HEALTH_CHECK_INTERVAL_SECONDS:-15}
+  REDIS_RETRY_ATTEMPTS: ${REDIS_RETRY_ATTEMPTS:-5}
+  RAY_ADDRESS: ray://ray-head:10001
+  RAY_gcs_server_request_timeout_seconds: ${RAY_GCS_REQUEST_TIMEOUT_SECONDS:-5}
+  UPLOAD_DIR: /data/uploads
+  RESULT_DIR: /data/results
+  FRONTEND_DIR: /app/frontend
+  CHUNK_SIZE_FRAMES: ${CHUNK_SIZE_FRAMES:-64}
+  CHUNK_OVERLAP_FRAMES: ${CHUNK_OVERLAP_FRAMES:-16}
+  MAX_DECODED_CHUNK_BYTES: ${MAX_DECODED_CHUNK_BYTES:-83886080}
+  MAX_INFLIGHT_CHUNKS_PER_TASK: ${MAX_INFLIGHT_CHUNKS_PER_TASK:-1}
+  MAX_INFLIGHT_CHUNKS_GLOBAL: ${MAX_INFLIGHT_CHUNKS_GLOBAL:-2}
+  INGEST_BACKPRESSURE_POLL_SECONDS: ${INGEST_BACKPRESSURE_POLL_SECONDS:-0.1}
+  DOWNSTREAM_STALL_TIMEOUT_SECONDS: ${DOWNSTREAM_STALL_TIMEOUT_SECONDS:-120}
+  VIDEO_PROBE_TIMEOUT_SECONDS: ${VIDEO_PROBE_TIMEOUT_SECONDS:-900}
+  DECODE_BATCH_TIMEOUT_SECONDS: ${DECODE_BATCH_TIMEOUT_SECONDS:-120}
+  FFMPEG_DECODE_THREADS: ${FFMPEG_DECODE_THREADS:-1}
+  RAY_PUT_TIMEOUT_SECONDS: ${RAY_PUT_TIMEOUT_SECONDS:-60}
+  RAY_PUT_MAX_ATTEMPTS: ${RAY_PUT_MAX_ATTEMPTS:-2}
+  RAY_PUT_RETRY_DELAY_SECONDS: ${RAY_PUT_RETRY_DELAY_SECONDS:-1}
+  RAY_ACTOR_CALL_TIMEOUT_SECONDS: ${RAY_ACTOR_CALL_TIMEOUT_SECONDS:-30}
+  MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-4294967296}
+  MAX_ARCHIVE_UPLOAD_BYTES: ${MAX_ARCHIVE_UPLOAD_BYTES:-4294967296}
+  MAX_ARCHIVE_VIDEO_BYTES: ${MAX_ARCHIVE_VIDEO_BYTES:-4294967296}
+  MAX_ARCHIVE_UNCOMPRESSED_BYTES: ${MAX_ARCHIVE_UNCOMPRESSED_BYTES:-8589934592}
+  MAX_ARCHIVE_MEMBERS: ${MAX_ARCHIVE_MEMBERS:-2000}
+  MAX_ARCHIVE_COMPRESSION_RATIO: ${MAX_ARCHIVE_COMPRESSION_RATIO:-100}
+  ARCHIVE_DISK_RESERVE_BYTES: ${ARCHIVE_DISK_RESERVE_BYTES:-536870912}
+  STATUS_READ_MAX_ATTEMPTS: ${STATUS_READ_MAX_ATTEMPTS:-3}
+  STATUS_READ_RETRY_DELAY_SECONDS: ${STATUS_READ_RETRY_DELAY_SECONDS:-0.05}
+  STREAM_RETRY_DELAY_SECONDS: ${STREAM_RETRY_DELAY_SECONDS:-0.5}
+  STREAM_PROCESSING_HEARTBEAT_SECONDS: ${STREAM_PROCESSING_HEARTBEAT_SECONDS:-15}
+  MOCK_WORKER_DELAY_MS: ${MOCK_WORKER_DELAY_MS:-0}
+  PROGRESS_UPDATE_EVERY_CHUNKS: ${PROGRESS_UPDATE_EVERY_CHUNKS:-5}
+  INGEST_WORKER_CONCURRENCY: ${INGEST_WORKER_CONCURRENCY:-1}
+  CUT_WORKER_CONCURRENCY: ${CUT_WORKER_CONCURRENCY:-2}
+  COORDINATOR_WORKER_CONCURRENCY: ${COORDINATOR_WORKER_CONCURRENCY:-4}
+  TRACKING_WORKER_CONCURRENCY: ${TRACKING_WORKER_CONCURRENCY:-2}
+  AGGREGATOR_WORKER_CONCURRENCY: ${AGGREGATOR_WORKER_CONCURRENCY:-2}
+  ALLOW_REMOTE_URLS: ${ALLOW_REMOTE_URLS:-false}
+  WORKER_METRICS_PORT: 9101
+
+x-backend-build: &backend-build
+  context: .
+  dockerfile: backend/docker/Dockerfile.backend
+
+x-worker-common: &worker-common
+  build: *backend-build
+  restart: unless-stopped
+  environment: *app-env
+  volumes:
+    - uploads:/data/uploads
+    - results:/data/results
+  expose:
+    - "9101"
+  depends_on:
+    redis:
+      condition: service_healthy
+    ray-head:
+      condition: service_healthy
+    storage-init:
+      condition: service_completed_successfully
+  networks:
+    - pipeline
+
+services:
+  storage-init:
+    image: alpine:3.22
+    user: "0:0"
+    command:
+      - sh
+      - -lc
+      - mkdir -p /data/uploads /data/results && chown -R 10001:10001 /data/uploads /data/results
+    restart: "no"
+    volumes:
+      - uploads:/data/uploads
+      - results:/data/results
+    networks:
+      - pipeline
+
+  redis:
+    image: redis:8.2.7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    expose:
+      - "6379"
+    networks:
+      - pipeline
+
+  ray-head:
+    image: rayproject/ray:2.55.1-py311
+    environment:
+      RAY_memory_monitor_refresh_ms: ${RAY_MEMORY_MONITOR_REFRESH_MS:-0}
+      RAY_memory_usage_threshold: ${RAY_MEMORY_USAGE_THRESHOLD:-0.99}
+    command:
+      - bash
+      - -lc
+      - >-
+        ray start --head --block
+        --disable-usage-stats
+        --port=6379
+        --ray-client-server-port=10001
+        --include-dashboard=${RAY_INCLUDE_DASHBOARD:-false}
+        --object-store-memory=${RAY_OBJECT_STORE_BYTES:-268435456}
+    restart: unless-stopped
+    shm_size: ${RAY_SHM_SIZE:-512mb}
+    healthcheck:
+      test: ["CMD-SHELL", "ray status >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    expose:
+      - "6379"
+      - "10001"
+      - "8265"
+    networks:
+      - pipeline
+
+  backend:
+    build: *backend-build
+    restart: unless-stopped
+    environment: *app-env
+    volumes:
+      - uploads:/data/uploads
+      - results:/data/results
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+      ray-head:
+        condition: service_healthy
+      storage-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    networks:
+      - pipeline
+
+  ingest-worker:
+    <<: *worker-common
+    command: ["python", "-m", "app.workers.ingest"]
+
+  coordinator:
+    <<: *worker-common
+    command: ["python", "-m", "app.workers.coordinator"]
+
+  aggregator:
+    <<: *worker-common
+    command: ["python", "-m", "app.workers.aggregator"]
+
+  mock-cut-worker:
+    <<: *worker-common
+    command: ["python", "-m", "app.workers.mock_cut"]
+    profiles: ["mock"]
+
+  mock-tracking-worker:
+    <<: *worker-common
+    command: ["python", "-m", "app.workers.mock_tracking"]
+    profiles: ["mock"]
+
+  prometheus:
+    image: prom/prometheus:v3.13.1
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    networks:
+      - pipeline
+
+  grafana:
+    image: grafana/grafana:12.3.9
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-change-me}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - pipeline
+
+  node-exporter:
+    image: prom/node-exporter:v1.12.1
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    command:
+      - --path.rootfs=/host
+    pid: host
+    volumes:
+      - /:/host:ro,rslave
+    expose:
+      - "9100"
+    networks:
+      - pipeline
+
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.88.0
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    environment:
+      REDIS_ADDR: redis://redis:6379
+    expose:
+      - "9121"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - pipeline
+
+  dcgm-exporter:
+    image: nvcr.io/nvidia/k8s/dcgm-exporter:4.4.2-4.7.1-ubuntu22.04
+    profiles: ["gpu"]
+    restart: unless-stopped
+    cap_add:
+      - SYS_ADMIN
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    expose:
+      - "9400"
+    networks:
+      - pipeline
+
+volumes:
+  uploads:
+  results:
+  redis-data:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  pipeline:
+    driver: bridge

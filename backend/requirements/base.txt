@@ -1,0 +1,8 @@
+fastapi==0.128.2
+uvicorn[standard]==0.40.0
+pydantic==2.13.4
+pydantic-settings==2.14.1
+python-multipart==0.0.32
+prometheus-client==0.25.0
+httpx==0.28.1
+numpy==1.26.4
